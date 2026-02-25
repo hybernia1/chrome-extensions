@@ -47,6 +47,15 @@ async function updateDone(invoiceNo, patch) {
   return nextRec;
 }
 
+function toStatePatchFromDownloadItem(item) {
+  if (!item) return null;
+  const file = (item.filename || "").replaceAll("\\", "/");
+  return {
+    path: file,
+    id: item.id
+  };
+}
+
 async function sendToTab(tabId, msg) {
   try { await chrome.tabs.sendMessage(tabId, msg); } catch {}
 }
@@ -142,40 +151,50 @@ function expandTaskByMode(invoiceNo, mode, attempts = 0) {
   return [{ invoiceNo, mode, attempts }];
 }
 
-async function detectExistingDownloads(orderNo, invoiceNo) {
+async function findLatestCompletedDownloads(orderNo, invoiceNo) {
   const { pdfPrefix, isdocPrefix } = buildTargetPrefixes(orderNo, invoiceNo);
-  const pdfRegex = `(^|[\/\\])${escapeRegExp(pdfPrefix)}pdf$`;
-  const isdocRegex = `(^|[\/\\])${escapeRegExp(isdocPrefix)}(isdoc|isdocx)$`;
+  const pdfRegex = `(^|[\\/\\\\])${escapeRegExp(pdfPrefix)}[pP][dD][fF]$`;
+  const isdocRegex = `(^|[\\/\\\\])${escapeRegExp(isdocPrefix)}([iI][sS][dD][oO][cC]|[iI][sS][dD][oO][cC][xX])$`;
 
   try {
     const [pdfItems, isdocItems] = await Promise.all([
-      chrome.downloads.search({ state: "complete", filenameRegex: pdfRegex, limit: 1 }),
-      chrome.downloads.search({ state: "complete", filenameRegex: isdocRegex, limit: 1 })
+      chrome.downloads.search({ filenameRegex: pdfRegex, exists: true, orderBy: ["-startTime"], limit: 20 }),
+      chrome.downloads.search({ filenameRegex: isdocRegex, exists: true, orderBy: ["-startTime"], limit: 20 })
     ]);
 
-    return { pdf: pdfItems.length > 0, isdoc: isdocItems.length > 0 };
+    const pdfItem = pdfItems.find(i => i.state === "complete") || pdfItems[0] || null;
+    const isdocItem = isdocItems.find(i => i.state === "complete") || isdocItems[0] || null;
+
+    return { pdfItem, isdocItem };
   } catch {
-    const items = await chrome.downloads.search({ state: "complete", limit: 500 });
-    let pdf = false;
-    let isdoc = false;
+    const items = await chrome.downloads.search({ exists: true, orderBy: ["-startTime"], limit: 1000 });
+    let pdfItem = null;
+    let isdocItem = null;
     for (const it of items) {
-      if (!pdf && filenameHasPrefix(it, pdfPrefix)) pdf = true;
-      if (!isdoc && filenameHasPrefix(it, isdocPrefix)) isdoc = true;
-      if (pdf && isdoc) break;
+      if (!pdfItem && filenameHasPrefix(it, pdfPrefix)) pdfItem = it;
+      if (!isdocItem && filenameHasPrefix(it, isdocPrefix)) isdocItem = it;
+      if (pdfItem && isdocItem) break;
     }
-    return { pdf, isdoc };
+    return { pdfItem, isdocItem };
   }
 }
 
 async function syncDoneWithDisk(row) {
   const st = await getState();
   const rec = st.done[row.invoiceNo] || {};
-  const fromDisk = await detectExistingDownloads(row.orderNo, row.invoiceNo);
+  const found = await findLatestCompletedDownloads(row.orderNo, row.invoiceNo);
+
+  const pdfInfo = toStatePatchFromDownloadItem(found.pdfItem);
+  const isdocInfo = toStatePatchFromDownloadItem(found.isdocItem);
 
   const patch = {
     orderNo: row.orderNo,
-    pdf: !!rec.pdf || fromDisk.pdf,
-    isdoc: !!rec.isdoc || fromDisk.isdoc
+    pdf: !!rec.pdf || !!pdfInfo,
+    isdoc: !!rec.isdoc || !!isdocInfo,
+    pdfPath: pdfInfo?.path || rec.pdfPath || null,
+    pdfDownloadId: pdfInfo?.id || rec.pdfDownloadId || null,
+    isdocPath: isdocInfo?.path || rec.isdocPath || null,
+    isdocDownloadId: isdocInfo?.id || rec.isdocDownloadId || null
   };
 
   if (patch.pdf && patch.isdoc) patch.lastError = null;
@@ -185,6 +204,28 @@ async function syncDoneWithDisk(row) {
   }
 
   return { ...rec, ...patch };
+}
+
+async function resyncDoneForRows(rows) {
+  const done = {};
+  for (const row of rows) {
+    const found = await findLatestCompletedDownloads(row.orderNo, row.invoiceNo);
+    const pdfInfo = toStatePatchFromDownloadItem(found.pdfItem);
+    const isdocInfo = toStatePatchFromDownloadItem(found.isdocItem);
+
+    done[row.invoiceNo] = {
+      orderNo: row.orderNo,
+      pdf: !!pdfInfo,
+      isdoc: !!isdocInfo,
+      pdfPath: pdfInfo?.path || null,
+      pdfDownloadId: pdfInfo?.id || null,
+      isdocPath: isdocInfo?.path || null,
+      isdocDownloadId: isdocInfo?.id || null,
+      lastError: null,
+      updatedAt: Date.now()
+    };
+  }
+  return done;
 }
 
 async function pollForCompletion(active, timeoutMs = 180000) {
@@ -220,6 +261,10 @@ async function pollForCompletion(active, timeoutMs = 180000) {
       orderNo: active.orderNo,
       pdf: pdfDone || (rec?.pdf || false),
       isdoc: isdocDone || (rec?.isdoc || false),
+      pdfPath: rec?.pdfPath || null,
+      pdfDownloadId: rec?.pdfDownloadId || null,
+      isdocPath: rec?.isdocPath || null,
+      isdocDownloadId: rec?.isdocDownloadId || null,
       lastError: null
     });
     await pushStateToUI();
@@ -374,6 +419,8 @@ async function startNextIfIdle() {
   await setState({ active: null });
   expectedCache = null;
 
+  await syncDoneWithDisk(row);
+
   await setStatus(`Hotovo: ${active.invoiceNo} (${active.mode})`);
   await pushStateToUI();
   await sleep(250);
@@ -455,7 +502,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.type === "ALZA_CLEAR_DATA") {
+      const stBefore = await getState();
+      const rowsToKeep = stBefore.rows || [];
+
       await clearAllState();
+      const done = await resyncDoneForRows(rowsToKeep);
       // after clearing, reattach tabId if possible
       const tabId = sender?.tab?.id;
       const windowId = sender?.tab?.windowId;
@@ -463,17 +514,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await chrome.storage.session.set({
           [STATE_KEY]: {
             tabId, windowId,
-            rows: [],
-            done: {},
+            rows: rowsToKeep,
+            done,
             running: false,
             active: null,
             queue: []
           }
         });
       }
-      await sendToTab(tabId, { type: "ALZA_STATUS", text: "Data smazána." });
+      await sendToTab(tabId, { type: "ALZA_STATUS", text: "Fronta smazána, stav synchronizován z disku." });
       await sendToTab(tabId, { type: "ALZA_STATE", state: await getState() });
       return sendResponse({ ok: true });
+    }
+
+    if (msg.type === "ALZA_OPEN_DOWNLOADED") {
+      const st = await getState();
+      const { invoiceNo, mode } = msg;
+      const rec = st.done[invoiceNo] || {};
+      const id = mode === "pdf" ? rec.pdfDownloadId : rec.isdocDownloadId;
+      if (!id && id !== 0) return sendResponse({ ok: false, error: "Soubor nebyl v historii nalezen." });
+      try {
+        await chrome.downloads.show(id);
+        return sendResponse({ ok: true });
+      } catch {
+        return sendResponse({ ok: false, error: "Soubor nelze otevřít v systému." });
+      }
     }
 
     if (msg.type === "ALZA_RETRY") {
