@@ -281,11 +281,11 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   if (msg?.type === "ALZA_RUN_ROW") {
     (async () => {
-      const { invoiceNo, mode } = msg;
+      const { invoiceNo, mode, runId } = msg;
 
       const savedY = window.scrollY;
       const tr = findTrByInvoice(invoiceNo);
-      if (!tr) return;
+      if (!tr) throw new Error(`Řádek faktury ${invoiceNo} nenalezen.`);
 
       tr.scrollIntoView({ block: "center", inline: "nearest" });
       await sleep(150);
@@ -298,7 +298,15 @@ chrome.runtime.onMessage.addListener((msg) => {
 
       await sleep(100);
       restoreScroll(savedY, tr);
-    })().catch(() => {});
+      await chrome.runtime.sendMessage({ type: "ALZA_RUN_ROW_RESULT", runId, ok: true });
+    })().catch(async (err) => {
+      await chrome.runtime.sendMessage({
+        type: "ALZA_RUN_ROW_RESULT",
+        runId: msg.runId,
+        ok: false,
+        error: err?.message || "Execution failed"
+      });
+    });
   }
 });
 

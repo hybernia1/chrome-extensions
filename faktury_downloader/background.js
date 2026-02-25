@@ -1,7 +1,13 @@
 const STATE_KEY = "alza_sidebar_state_v2";
+const MAX_RETRIES_PER_ITEM = 3;
+const EXEC_ACK_TIMEOUT_MS = 30000;
+const DOWNLOAD_TIMEOUT_MS = 180000;
 
 // SYNC cache for onDeterminingFilename
 let expectedCache = null; // { invoiceNo, orderNo }
+let runnerActive = false;
+let runSeq = 0;
+let ackWaiters = new Map();
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -27,6 +33,8 @@ async function setState(patch) {
 
 async function clearAllState() {
   expectedCache = null;
+  ackWaiters.forEach((resolve) => resolve({ ok: false, error: "State cleared" }));
+  ackWaiters = new Map();
   await chrome.storage.session.remove(STATE_KEY);
 }
 
@@ -157,14 +165,74 @@ async function pollForCompletion(active, timeoutMs = 180000) {
   return { timeout: true };
 }
 
+function nextRunId() {
+  runSeq += 1;
+  return `run-${Date.now()}-${runSeq}`;
+}
+
+function withExecAckWaiter(runId, timeoutMs = EXEC_ACK_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      ackWaiters.delete(runId);
+      resolve({ ok: false, error: "Execution ack timeout" });
+    }, timeoutMs);
+
+    ackWaiters.set(runId, (result) => {
+      clearTimeout(timer);
+      ackWaiters.delete(runId);
+      resolve(result || { ok: false, error: "Unknown execution result" });
+    });
+  });
+}
+
+function resolveExecAck(runId, result) {
+  if (!runId) return;
+  const waiter = ackWaiters.get(runId);
+  if (waiter) waiter(result);
+}
+
+async function requeueWithRetry(task, reason) {
+  const attempts = (task.attempts || 0) + 1;
+  await updateDone(task.invoiceNo, { lastError: reason });
+
+  if (attempts >= MAX_RETRIES_PER_ITEM) {
+    await setStatus(`Selhalo: ${task.invoiceNo} (${task.mode}) - ${reason}`);
+    await pushStateToUI();
+    return;
+  }
+
+  const st = await getState();
+  const queuedTask = { ...task, attempts };
+  await setState({ queue: [...(st.queue || []), queuedTask] });
+  await setStatus(`Retry ${attempts}/${MAX_RETRIES_PER_ITEM - 1}: ${task.invoiceNo} (${task.mode})`);
+  await pushStateToUI();
+}
+
 // ----- Queue runner -----
 async function startNextIfIdle() {
+  if (runnerActive) return;
+  runnerActive = true;
+
+  try {
+  while (true) {
   const st = await getState();
   if (!st.running || !st.tabId) return;
-  if (st.active) return;
 
-  const nextTask = st.queue.shift();
-  await setState({ queue: st.queue });
+  if (st.active) {
+    const recoveredQueue = [{
+      invoiceNo: st.active.invoiceNo,
+      mode: st.active.mode,
+      attempts: st.active.attempts || 0
+    }, ...(st.queue || [])];
+    await setState({ active: null, queue: recoveredQueue });
+    await setStatus(`Obnovuji zaseknutou položku: ${st.active.invoiceNo} (${st.active.mode})`);
+    await pushStateToUI();
+    continue;
+  }
+
+  const queue = [...(st.queue || [])];
+  const nextTask = queue.shift();
+  await setState({ queue });
 
   if (!nextTask) {
     await setStatus("Queue prázdná.");
@@ -176,10 +244,18 @@ async function startNextIfIdle() {
   if (!row) {
     await setStatus(`Řádek nenalezen: ${nextTask.invoiceNo}`);
     await pushStateToUI();
-    return startNextIfIdle();
+    continue;
   }
 
-  const active = { invoiceNo: row.invoiceNo, orderNo: row.orderNo, mode: nextTask.mode, startedAt: Date.now() };
+  const runId = nextRunId();
+  const active = {
+    invoiceNo: row.invoiceNo,
+    orderNo: row.orderNo,
+    mode: nextTask.mode,
+    runId,
+    attempts: nextTask.attempts || 0,
+    startedAt: Date.now()
+  };
   await setState({ active });
   expectedCache = { invoiceNo: row.invoiceNo, orderNo: row.orderNo };
 
@@ -187,22 +263,32 @@ async function startNextIfIdle() {
   await setStatus(`Spouštím: ${row.invoiceNo} (${nextTask.mode})`);
   await pushStateToUI();
 
-  await sendToTab(st.tabId, { type: "ALZA_RUN_ROW", invoiceNo: row.invoiceNo, mode: nextTask.mode });
+  const ackPromise = withExecAckWaiter(runId, EXEC_ACK_TIMEOUT_MS);
+  await sendToTab(st.tabId, { type: "ALZA_RUN_ROW", invoiceNo: row.invoiceNo, mode: nextTask.mode, runId });
+  const execAck = await ackPromise;
 
-  const pollResult = await pollForCompletion(active, 180000);
+  const afterAck = await getState();
+  if (!afterAck.running || !afterAck.active || afterAck.active.runId !== runId) return;
+
+  if (!execAck?.ok) {
+    await setState({ active: null });
+    expectedCache = null;
+    await requeueWithRetry(nextTask, execAck?.error || "Execution failed");
+    continue;
+  }
+
+  const pollResult = await pollForCompletion(active, DOWNLOAD_TIMEOUT_MS);
 
   const st2 = await getState();
   if (!st2.running) return;
   if (pollResult?.aborted) return;
 
   if (pollResult?.timeout) {
-    await updateDone(active.invoiceNo, { lastError: `Timeout (${active.mode})` });
     await setState({ active: null });
     expectedCache = null;
 
-    await setStatus(`Timeout: ${active.invoiceNo} (${active.mode}) → Retry`);
-    await pushStateToUI();
-    return startNextIfIdle();
+    await requeueWithRetry(nextTask, `Timeout (${active.mode})`);
+    continue;
   }
 
   await setState({ active: null });
@@ -211,7 +297,10 @@ async function startNextIfIdle() {
   await setStatus(`Hotovo: ${active.invoiceNo} (${active.mode})`);
   await pushStateToUI();
   await sleep(250);
-  return startNextIfIdle();
+  }
+  } finally {
+    runnerActive = false;
+  }
 }
 
 // ----- Messages from content (sidebar) -----
@@ -240,7 +329,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const q = [];
       for (const r of st.rows) {
         const rec = st.done[r.invoiceNo] || {};
-        if (!(rec.pdf && rec.isdoc)) q.push({ invoiceNo: r.invoiceNo, mode: "both" });
+        if (!(rec.pdf && rec.isdoc)) q.push({ invoiceNo: r.invoiceNo, mode: "both", attempts: 0 });
       }
 
       await setState({ running: true, queue: q });
@@ -257,7 +346,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const q = [];
       for (const r of st.rows) {
         const rec = st.done[r.invoiceNo] || {};
-        if (!rec.isdoc) q.push({ invoiceNo: r.invoiceNo, mode: "isdoc" });
+        if (!rec.isdoc) q.push({ invoiceNo: r.invoiceNo, mode: "isdoc", attempts: 0 });
       }
 
       await setState({ running: true, queue: q });
@@ -269,6 +358,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.type === "ALZA_STOP") {
       expectedCache = null;
+      ackWaiters.forEach((resolve) => resolve({ ok: false, error: "Stopped" }));
+      ackWaiters = new Map();
       await setState({ running: false, active: null, queue: [] });
       await setStatus("Stop.");
       await pushStateToUI();
@@ -304,12 +395,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const { invoiceNo, mode } = msg;
       if (!invoiceNo || !mode) return sendResponse({ ok: false });
 
-      const q = [{ invoiceNo, mode }, ...(st.queue || [])];
+      const q = [{ invoiceNo, mode, attempts: 0 }, ...(st.queue || [])];
       await setState({ running: true, queue: q });
 
       await setStatus(`Retry queued: ${invoiceNo} (${mode})`);
       await pushStateToUI();
       startNextIfIdle().catch(() => {});
+      return sendResponse({ ok: true });
+    }
+
+    if (msg.type === "ALZA_RUN_ROW_RESULT") {
+      const st = await getState();
+      if (!st.active || st.active.runId !== msg.runId) return sendResponse({ ok: false });
+      resolveExecAck(msg.runId, { ok: !!msg.ok, error: msg.error || null });
       return sendResponse({ ok: true });
     }
 
