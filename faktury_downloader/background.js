@@ -120,6 +120,62 @@ function filenameHasPrefix(item, prefix) {
   return f.includes(`/${prefix}`) || f.includes(prefix);
 }
 
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isTaskDoneForMode(rec, mode) {
+  if (!rec) return false;
+  if (mode === "pdf") return !!rec.pdf;
+  if (mode === "isdoc") return !!rec.isdoc;
+  return !!rec.pdf && !!rec.isdoc;
+}
+
+async function detectExistingDownloads(orderNo, invoiceNo) {
+  const { pdfPrefix, isdocPrefix } = buildTargetPrefixes(orderNo, invoiceNo);
+  const pdfRegex = `(^|[\/\\])${escapeRegExp(pdfPrefix)}pdf$`;
+  const isdocRegex = `(^|[\/\\])${escapeRegExp(isdocPrefix)}(isdoc|isdocx)$`;
+
+  try {
+    const [pdfItems, isdocItems] = await Promise.all([
+      chrome.downloads.search({ state: "complete", filenameRegex: pdfRegex, limit: 1 }),
+      chrome.downloads.search({ state: "complete", filenameRegex: isdocRegex, limit: 1 })
+    ]);
+
+    return { pdf: pdfItems.length > 0, isdoc: isdocItems.length > 0 };
+  } catch {
+    const items = await chrome.downloads.search({ state: "complete", limit: 500 });
+    let pdf = false;
+    let isdoc = false;
+    for (const it of items) {
+      if (!pdf && filenameHasPrefix(it, pdfPrefix)) pdf = true;
+      if (!isdoc && filenameHasPrefix(it, isdocPrefix)) isdoc = true;
+      if (pdf && isdoc) break;
+    }
+    return { pdf, isdoc };
+  }
+}
+
+async function syncDoneWithDisk(row) {
+  const st = await getState();
+  const rec = st.done[row.invoiceNo] || {};
+  const fromDisk = await detectExistingDownloads(row.orderNo, row.invoiceNo);
+
+  const patch = {
+    orderNo: row.orderNo,
+    pdf: !!rec.pdf || fromDisk.pdf,
+    isdoc: !!rec.isdoc || fromDisk.isdoc
+  };
+
+  if (patch.pdf && patch.isdoc) patch.lastError = null;
+
+  if (patch.pdf !== !!rec.pdf || patch.isdoc !== !!rec.isdoc || patch.orderNo !== rec.orderNo || patch.lastError !== rec.lastError) {
+    await updateDone(row.invoiceNo, patch);
+  }
+
+  return { ...rec, ...patch };
+}
+
 async function pollForCompletion(active, timeoutMs = 180000) {
   const started = Date.now();
   const { pdfPrefix, isdocPrefix } = buildTargetPrefixes(active.orderNo, active.invoiceNo);
@@ -247,6 +303,13 @@ async function startNextIfIdle() {
     continue;
   }
 
+  const recFromDisk = await syncDoneWithDisk(row);
+  if (isTaskDoneForMode(recFromDisk, nextTask.mode)) {
+    await setStatus(`Přeskakuji (už staženo): ${row.invoiceNo} (${nextTask.mode})`);
+    await pushStateToUI();
+    continue;
+  }
+
   const runId = nextRunId();
   const active = {
     invoiceNo: row.invoiceNo,
@@ -303,6 +366,19 @@ async function startNextIfIdle() {
   }
 }
 
+async function buildQueueFromRows(rows, mode) {
+  const queue = [];
+
+  for (const row of rows) {
+    const rec = await syncDoneWithDisk(row);
+    if (!isTaskDoneForMode(rec, mode)) {
+      queue.push({ invoiceNo: row.invoiceNo, mode, attempts: 0 });
+    }
+  }
+
+  return queue;
+}
+
 // ----- Messages from content (sidebar) -----
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
@@ -326,11 +402,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const st = await getState();
       if (!st.tabId) return sendResponse({ ok: false, error: "No tab" });
 
-      const q = [];
-      for (const r of st.rows) {
-        const rec = st.done[r.invoiceNo] || {};
-        if (!(rec.pdf && rec.isdoc)) q.push({ invoiceNo: r.invoiceNo, mode: "both", attempts: 0 });
-      }
+      const q = await buildQueueFromRows(st.rows, "both");
 
       await setState({ running: true, queue: q });
       await setStatus(`Start all: ${q.length} položek`);
@@ -343,11 +415,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const st = await getState();
       if (!st.tabId) return sendResponse({ ok: false, error: "No tab" });
 
-      const q = [];
-      for (const r of st.rows) {
-        const rec = st.done[r.invoiceNo] || {};
-        if (!rec.isdoc) q.push({ invoiceNo: r.invoiceNo, mode: "isdoc", attempts: 0 });
-      }
+      const q = await buildQueueFromRows(st.rows, "isdoc");
 
       await setState({ running: true, queue: q });
       await setStatus(`Start ISDOC: ${q.length} položek`);
