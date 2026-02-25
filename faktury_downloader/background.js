@@ -131,6 +131,17 @@ function isTaskDoneForMode(rec, mode) {
   return !!rec.pdf && !!rec.isdoc;
 }
 
+function expandTaskByMode(invoiceNo, mode, attempts = 0) {
+  if (mode === "both") {
+    return [
+      { invoiceNo, mode: "pdf", attempts },
+      { invoiceNo, mode: "isdoc", attempts }
+    ];
+  }
+
+  return [{ invoiceNo, mode, attempts }];
+}
+
 async function detectExistingDownloads(orderNo, invoiceNo) {
   const { pdfPrefix, isdocPrefix } = buildTargetPrefixes(orderNo, invoiceNo);
   const pdfRegex = `(^|[\/\\])${escapeRegExp(pdfPrefix)}pdf$`;
@@ -310,6 +321,12 @@ async function startNextIfIdle() {
     continue;
   }
 
+  if (nextTask.mode === "both") {
+    const expanded = expandTaskByMode(nextTask.invoiceNo, "both", nextTask.attempts || 0);
+    await setState({ queue: [...expanded, ...queue] });
+    continue;
+  }
+
   const runId = nextRunId();
   const active = {
     invoiceNo: row.invoiceNo,
@@ -371,8 +388,11 @@ async function buildQueueFromRows(rows, mode) {
 
   for (const row of rows) {
     const rec = await syncDoneWithDisk(row);
-    if (!isTaskDoneForMode(rec, mode)) {
-      queue.push({ invoiceNo: row.invoiceNo, mode, attempts: 0 });
+    const tasks = expandTaskByMode(row.invoiceNo, mode, 0);
+    for (const task of tasks) {
+      if (!isTaskDoneForMode(rec, task.mode)) {
+        queue.push(task);
+      }
     }
   }
 
@@ -463,7 +483,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const { invoiceNo, mode } = msg;
       if (!invoiceNo || !mode) return sendResponse({ ok: false });
 
-      const q = [{ invoiceNo, mode, attempts: 0 }, ...(st.queue || [])];
+      const retryTasks = expandTaskByMode(invoiceNo, mode, 0);
+      const q = [...retryTasks, ...(st.queue || [])];
       await setState({ running: true, queue: q });
 
       await setStatus(`Retry queued: ${invoiceNo} (${mode})`);
