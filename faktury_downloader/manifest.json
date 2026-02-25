@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Alza Faktury Sidebar",
+  "version": "1.1",
+  "permissions": ["tabs", "scripting", "downloads", "storage"],
+  "host_permissions": [
+    "https://www.alza.cz/*",
+    "https://pdf.alza.cz/*",
+    "https://webapi.alza.cz/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.alza.cz/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

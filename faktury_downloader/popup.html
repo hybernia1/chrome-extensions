@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px system-ui; width: 360px; margin: 12px; }
+    .box { padding: 10px; border: 1px solid #ddd; border-radius: 10px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .row { display:flex; gap:8px; margin-top:10px; }
+    button { height: 36px; flex:1; }
+    small { display:block; margin-top:10px; opacity:.85; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div><b>Stav</b></div>
+    <div>Index: <span id="idx" class="mono">-</span> / <span id="total" class="mono">-</span></div>
+    <div>Objednávka: <span id="order" class="mono">-</span></div>
+    <div>Faktura: <span id="invoice" class="mono">-</span></div>
+    <small id="status">-</small>
+  </div>
+
+  <div class="row">
+    <button id="start">Start</button>
+    <button id="stop">Stop</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
