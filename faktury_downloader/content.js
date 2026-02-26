@@ -206,6 +206,17 @@ function rowPills(rec) {
   `;
 }
 
+function rowLinks(rec, invoiceNo) {
+  const pdf = rec?.pdfPath
+    ? `<button data-act="openPdf" data-inv="${invoiceNo}">Otevřít PDF</button>`
+    : `<button disabled title="PDF nenalezeno">Otevřít PDF</button>`;
+  const isdoc = rec?.isdocPath
+    ? `<button data-act="openIsdoc" data-inv="${invoiceNo}">Otevřít ISDOC</button>`
+    : `<button disabled title="ISDOC nenalezen">Otevřít ISDOC</button>`;
+
+  return `${pdf}${isdoc}`;
+}
+
 function renderList(state) {
   const list = document.getElementById("alzaSbList");
   if (!list) return;
@@ -234,7 +245,13 @@ function renderList(state) {
           <button data-act="retryPdf" data-inv="${r.invoiceNo}">Retry PDF</button>
           <button data-act="retryIsdoc" data-inv="${r.invoiceNo}">Retry ISDOC</button>
           <button data-act="retryBoth" data-inv="${r.invoiceNo}">Retry obojí</button>
+          ${rowLinks(rec, r.invoiceNo)}
           <button data-act="scroll" data-inv="${r.invoiceNo}">Scroll</button>
+        </div>
+
+        <div class="alzaSbRowErr" style="color:#bcd4ff;">
+          ${rec?.pdfPath ? `PDF: ${rec.pdfPath}` : "PDF: -"}<br>
+          ${rec?.isdocPath ? `ISDOC: ${rec.isdocPath}` : "ISDOC: -"}
         </div>
 
         ${err}
@@ -251,6 +268,8 @@ function renderList(state) {
       if (act === "retryPdf") await chrome.runtime.sendMessage({ type: "ALZA_RETRY", invoiceNo: inv, mode: "pdf" });
       if (act === "retryIsdoc") await chrome.runtime.sendMessage({ type: "ALZA_RETRY", invoiceNo: inv, mode: "isdoc" });
       if (act === "retryBoth") await chrome.runtime.sendMessage({ type: "ALZA_RETRY", invoiceNo: inv, mode: "both" });
+      if (act === "openPdf") await chrome.runtime.sendMessage({ type: "ALZA_OPEN_DOWNLOADED", invoiceNo: inv, mode: "pdf" });
+      if (act === "openIsdoc") await chrome.runtime.sendMessage({ type: "ALZA_OPEN_DOWNLOADED", invoiceNo: inv, mode: "isdoc" });
 
       if (act === "scroll") {
         const tr = findTrByInvoice(inv);
@@ -281,11 +300,11 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   if (msg?.type === "ALZA_RUN_ROW") {
     (async () => {
-      const { invoiceNo, mode } = msg;
+      const { invoiceNo, mode, runId } = msg;
 
       const savedY = window.scrollY;
       const tr = findTrByInvoice(invoiceNo);
-      if (!tr) return;
+      if (!tr) throw new Error(`Řádek faktury ${invoiceNo} nenalezen.`);
 
       tr.scrollIntoView({ block: "center", inline: "nearest" });
       await sleep(150);
@@ -298,7 +317,15 @@ chrome.runtime.onMessage.addListener((msg) => {
 
       await sleep(100);
       restoreScroll(savedY, tr);
-    })().catch(() => {});
+      await chrome.runtime.sendMessage({ type: "ALZA_RUN_ROW_RESULT", runId, ok: true });
+    })().catch(async (err) => {
+      await chrome.runtime.sendMessage({
+        type: "ALZA_RUN_ROW_RESULT",
+        runId: msg.runId,
+        ok: false,
+        error: err?.message || "Execution failed"
+      });
+    });
   }
 });
 
