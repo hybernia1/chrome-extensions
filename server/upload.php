@@ -1,0 +1,165 @@
+<?php
+
+declare(strict_types=1);
+
+header('Content-Type: application/json; charset=utf-8');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: POST, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, X-Upload-Token');
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
+
+function respond(int $statusCode, array $payload): void
+{
+    http_response_code($statusCode);
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+function request_string(string $key): string
+{
+    $value = $_POST[$key] ?? '';
+    return is_string($value) ? trim($value) : '';
+}
+
+function sanitize_digits(string $value): string
+{
+    return preg_replace('/\D+/', '', $value) ?? '';
+}
+
+function ensure_directory(string $path): void
+{
+    if (is_dir($path)) {
+        return;
+    }
+
+    if (!mkdir($path, 0775, true) && !is_dir($path)) {
+        respond(500, [
+            'ok' => false,
+            'error' => sprintf('Nepodařilo se vytvořit složku %s.', $path),
+        ]);
+    }
+}
+
+function allowed_extension(string $type, string $originalName, string $mimeType): string
+{
+    $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+
+    if ($type === 'pdf') {
+        return 'pdf';
+    }
+
+    if (in_array($extension, ['isdoc', 'isdocx'], true)) {
+        return $extension;
+    }
+
+    if (stripos($mimeType, 'xml') !== false || stripos($mimeType, 'isdoc') !== false) {
+        return 'isdoc';
+    }
+
+    return 'isdoc';
+}
+
+$expectedToken = getenv('ALZA_UPLOAD_TOKEN') ?: '';
+$providedToken = $_SERVER['HTTP_X_UPLOAD_TOKEN'] ?? '';
+if ($expectedToken !== '' && !hash_equals($expectedToken, $providedToken)) {
+    respond(401, [
+        'ok' => false,
+        'error' => 'Neplatný upload token.',
+    ]);
+}
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    respond(405, [
+        'ok' => false,
+        'error' => 'Povolena je pouze metoda POST.',
+    ]);
+}
+
+$invoiceNo = sanitize_digits(request_string('invoiceNo'));
+$orderNo = sanitize_digits(request_string('orderNo'));
+$type = strtolower(request_string('type'));
+$source = request_string('source');
+$sourceUrl = request_string('sourceUrl');
+
+if ($invoiceNo === '' || $orderNo === '') {
+    respond(422, [
+        'ok' => false,
+        'error' => 'Chybí invoiceNo nebo orderNo.',
+    ]);
+}
+
+if (!in_array($type, ['pdf', 'isdoc'], true)) {
+    respond(422, [
+        'ok' => false,
+        'error' => 'Neplatný typ souboru.',
+    ]);
+}
+
+if (!isset($_FILES['file']) || !is_array($_FILES['file'])) {
+    respond(422, [
+        'ok' => false,
+        'error' => 'Soubor nebyl odeslán.',
+    ]);
+}
+
+$file = $_FILES['file'];
+if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+    respond(422, [
+        'ok' => false,
+        'error' => 'Upload souboru selhal.',
+        'phpUploadError' => $file['error'] ?? null,
+    ]);
+}
+
+$tmpName = $file['tmp_name'] ?? '';
+$originalName = is_string($file['name'] ?? null) ? $file['name'] : '';
+$mimeType = is_string($file['type'] ?? null) ? $file['type'] : '';
+$extension = allowed_extension($type, $originalName, $mimeType);
+
+$baseDir = __DIR__;
+$targetRoot = $type === 'pdf' ? 'invoice' : 'isdoc';
+$targetDir = $baseDir . DIRECTORY_SEPARATOR . $targetRoot . DIRECTORY_SEPARATOR . $orderNo;
+$targetFile = $targetDir . DIRECTORY_SEPARATOR . $invoiceNo . '.' . $extension;
+$relativePath = $targetRoot . '/' . $orderNo . '/' . $invoiceNo . '.' . $extension;
+
+ensure_directory($targetDir);
+
+if (is_file($targetFile)) {
+    respond(200, [
+        'ok' => true,
+        'stored' => false,
+        'exists' => true,
+        'path' => $relativePath,
+        'invoiceNo' => $invoiceNo,
+        'orderNo' => $orderNo,
+        'type' => $type,
+        'source' => $source,
+        'sourceUrl' => $sourceUrl,
+    ]);
+}
+
+if (!is_uploaded_file($tmpName) || !move_uploaded_file($tmpName, $targetFile)) {
+    respond(500, [
+        'ok' => false,
+        'error' => 'Soubor se nepodařilo uložit.',
+    ]);
+}
+
+chmod($targetFile, 0664);
+
+respond(200, [
+    'ok' => true,
+    'stored' => true,
+    'exists' => false,
+    'path' => $relativePath,
+    'invoiceNo' => $invoiceNo,
+    'orderNo' => $orderNo,
+    'type' => $type,
+    'source' => $source,
+    'sourceUrl' => $sourceUrl,
+    'size' => filesize($targetFile),
+]);
