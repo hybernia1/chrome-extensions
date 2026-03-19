@@ -36,7 +36,7 @@ function normalizeAccountRecordList(values = []) {
 
 function getAccountKey(account) {
   const normalized = normalizeAccountRecord(account);
-  return normalized.sessionId || normalized.email;
+  return normalized.email || normalized.sessionId;
 }
 
 function getAccountEmail(account) {
@@ -75,8 +75,8 @@ function mergeAccountRecords(existingAccounts = [], discoveredAccounts = []) {
 
 function sortAccountRecords(accounts = []) {
   return [...normalizeAccountRecordList(accounts)].sort((a, b) => {
-    const keyA = getAccountKey(a);
-    const keyB = getAccountKey(b);
+    const keyA = getAccountEmail(a) || getAccountKey(a);
+    const keyB = getAccountEmail(b) || getAccountKey(b);
     return keyA.localeCompare(keyB);
   });
 }
@@ -408,9 +408,7 @@ function findAccountSwitchClickable(account) {
 
   const boxes = getAccountSwitcherBoxes();
   const matchedBox = boxes.find((box) => {
-    const boxSessionId = getAccountBoxSessionId(box);
-    if (normalized.sessionId && boxSessionId === normalized.sessionId) return true;
-    return getAccountBoxEmail(box) === normalized.email;
+    return normalized.email && getAccountBoxEmail(box) === normalized.email;
   });
   if (matchedBox) return matchedBox.closest("a") || matchedBox;
 
@@ -430,25 +428,6 @@ function findAccountSwitchClickable(account) {
   }
 
   return null;
-}
-
-function submitAccountSwitcherForm(account) {
-  const normalized = normalizeAccountRecord(account);
-  if (!normalized.sessionId) return false;
-
-  const form = document.querySelector(".switch-account form, form.login-wrapper");
-  const selectedSessionInput = document.querySelector("#SelectedSessionId[name='SelectedSessionId']");
-  if (!(form instanceof HTMLFormElement) || !(selectedSessionInput instanceof HTMLInputElement)) {
-    return false;
-  }
-
-  selectedSessionInput.value = normalized.sessionId;
-  if (typeof form.requestSubmit === "function") {
-    form.requestSubmit();
-  } else {
-    form.submit();
-  }
-  return true;
 }
 
 function getNextNonActiveAccountBox() {
@@ -555,14 +534,13 @@ async function selectTargetAccount(config = null) {
       return true;
     }
 
-    if (targetAccount?.sessionId) {
+    const targetNode = targetAccount ? findAccountSwitchClickable(targetAccount) : null;
+    if (targetNode) {
       if (config) {
         await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
       }
-      if (submitAccountSwitcherForm(targetAccount)) {
-        return true;
-      }
-      throw new Error(`Nepodařilo se odeslat switcher formulář pro účet ${getAccountLabel(targetAccount)}.`);
+      targetNode.click();
+      return true;
     }
 
     await sleep(250);
