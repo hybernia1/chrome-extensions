@@ -81,6 +81,17 @@ function sortAccountRecords(accounts = []) {
   });
 }
 
+async function getSwitcherDiscoveredCycleConfig() {
+  const accounts = sortAccountRecords(getAccountRecordsFromSwitcher());
+  if (!accounts.length) return null;
+  const config = {
+    accounts,
+    pauseMs: 30 * 60 * 1000
+  };
+  await persistAccountCycleConfig(config);
+  return config;
+}
+
 function getAutoStartMode() {
   const params = new URLSearchParams(location.search);
   const enabled = params.get("alzaAutoStart");
@@ -181,6 +192,10 @@ async function getAccountCycleConfig() {
       await persistAccountCycleConfig(config);
     }
     return config;
+  }
+
+  if (isAccountSwitcherPage()) {
+    return await getSwitcherDiscoveredCycleConfig();
   }
 
   return storedConfig;
