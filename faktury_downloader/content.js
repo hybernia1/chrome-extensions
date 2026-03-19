@@ -150,7 +150,8 @@ async function getStoredCycleState(config) {
       phase: typeof state.phase === "string" ? state.phase : "ensure-account",
       waitUntil: Number.isFinite(state.waitUntil) ? state.waitUntil : 0,
       lastQueueIdleAt: Number.isFinite(state.lastQueueIdleAt) ? state.lastQueueIdleAt : 0,
-      completedAccounts
+      completedAccounts,
+      roundComplete: !!state.roundComplete
     };
   } catch {
     return null;
@@ -275,7 +276,8 @@ async function getCycleState(config) {
     phase: "ensure-account",
     waitUntil: 0,
     lastQueueIdleAt: 0,
-    completedAccounts: []
+    completedAccounts: [],
+    roundComplete: false
   };
 
   try {
@@ -324,7 +326,8 @@ async function advanceCycleIndex(config) {
     phase: "ensure-account",
     waitUntil: Date.now() + (wrapped ? config.roundPauseMs : config.accountPauseMs),
     lastQueueIdleAt: 0,
-    completedAccounts: wrapped ? [] : current.completedAccounts || []
+    completedAccounts: wrapped ? [] : current.completedAccounts || [],
+    roundComplete: wrapped
   });
 }
 
@@ -343,7 +346,8 @@ async function completeCurrentAccountAndAdvance(config, currentAccount) {
       phase: "ensure-account",
       waitUntil: Date.now() + config.accountPauseMs,
       lastQueueIdleAt: 0,
-      completedAccounts
+      completedAccounts,
+      roundComplete: false
     });
   }
 
@@ -352,7 +356,8 @@ async function completeCurrentAccountAndAdvance(config, currentAccount) {
     phase: "ensure-account",
     waitUntil: Date.now() + config.roundPauseMs,
     lastQueueIdleAt: 0,
-    completedAccounts: []
+    completedAccounts,
+    roundComplete: true
   });
 }
 
@@ -1065,8 +1070,18 @@ async function handleAccountCycleTick() {
 
   accountCycleBusy = true;
   try {
+    let cycleState = await getCycleState(config);
+    if (cycleState.roundComplete && cycleState.waitUntil && Date.now() >= cycleState.waitUntil) {
+      cycleState = await setCycleState(config, {
+        index: 0,
+        phase: "ensure-account",
+        waitUntil: 0,
+        lastQueueIdleAt: 0,
+        completedAccounts: [],
+        roundComplete: false
+      });
+    }
     const targetEmail = await getTargetAccountEmail(config);
-    const cycleState = await getCycleState(config);
 
     ensureSidebar();
     setStatusText(await formatCycleStatus(config, targetEmail));
@@ -1194,7 +1209,8 @@ async function resetAccountCycleNow() {
     phase: "ensure-account",
     waitUntil: 0,
     lastQueueIdleAt: 0,
-    completedAccounts: []
+    completedAccounts: [],
+    roundComplete: false
   });
 
   ensureSidebar();
