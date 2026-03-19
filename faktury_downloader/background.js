@@ -3,6 +3,7 @@ const MAX_RETRIES_PER_ITEM = 3;
 const EXEC_ACK_TIMEOUT_MS = 30000;
 const DOWNLOAD_TIMEOUT_MS = 180000;
 const UPLOAD_ENDPOINT = "http://10.3.109.33/faktury/alza/upload.php";
+const UPLOAD_TOKEN = "";
 
 let expectedCache = null;
 let runnerActive = false;
@@ -343,6 +344,7 @@ async function uploadBlob({ blob, filename, invoiceNo, orderNo, type, sourceUrl 
 
   const response = await fetch(UPLOAD_ENDPOINT, {
     method: "POST",
+    headers: UPLOAD_TOKEN ? { "X-Upload-Token": UPLOAD_TOKEN } : undefined,
     body: formData
   });
 
@@ -382,7 +384,10 @@ async function uploadDownloadedArtifact(row, mode) {
   const sourceUrl = mode === "pdf" ? rec.pdfDownloadUrl : rec.isdocDownloadUrl;
   const path = mode === "pdf" ? rec.pdfPath : rec.isdocPath;
 
-  if (existingServerPath || !sourceUrl) return;
+  if (existingServerPath) return;
+  if (!sourceUrl) {
+    throw new Error(`Upload ${mode.toUpperCase()} nelze spustit: Chrome download historie nevrátila zdrojové URL.`);
+  }
 
   const fallbackExt = mode === "pdf" ? "pdf" : "isdoc";
   const filename = inferFilename(sourceUrl, `${row.invoiceNo}.${fallbackExt}`);
