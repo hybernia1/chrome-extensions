@@ -24,11 +24,32 @@ function findDocumentRowByInvoice(invoiceNo) {
   return findDocumentRows().find((tr) => (tr.innerText || '').includes(invoiceNo)) || null;
 }
 
+function dispatchMouseSequence(node) {
+  if (!node) return false;
+  const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+  for (const type of events) {
+    node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+  }
+  return true;
+}
+
+function getDocumentRowClickCandidates(tr) {
+  const firstCell = tr.querySelector('td');
+  return [
+    firstCell?.querySelector('[role="button"]'),
+    firstCell?.querySelector('button'),
+    firstCell?.querySelector('a'),
+    firstCell?.querySelector('span'),
+    firstCell,
+    tr
+  ].filter(Boolean);
+}
+
 function clickInvoiceInDocumentRow(tr) {
-  const td0 = tr.querySelector('td');
-  const clickable = td0?.querySelector('span');
-  if (!clickable) throw new Error('Klikací span (Faktura) nenalezen.');
-  clickable.click();
+  for (const candidate of getDocumentRowClickCandidates(tr)) {
+    if (dispatchMouseSequence(candidate)) return;
+  }
+  throw new Error('Klikací element faktury nenalezen.');
 }
 
 function extractRowsFromDocumentsTable() {
@@ -151,11 +172,32 @@ function findDocumentRowByInvoice(invoiceNo) {
   return findDocumentRows().find((tr) => (tr.innerText || '').includes(invoiceNo)) || null;
 }
 
+function dispatchMouseSequence(node) {
+  if (!node) return false;
+  const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+  for (const type of events) {
+    node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+  }
+  return true;
+}
+
+function getDocumentRowClickCandidates(tr) {
+  const firstCell = tr.querySelector('td');
+  return [
+    firstCell?.querySelector('[role="button"]'),
+    firstCell?.querySelector('button'),
+    firstCell?.querySelector('a'),
+    firstCell?.querySelector('span'),
+    firstCell,
+    tr
+  ].filter(Boolean);
+}
+
 function clickInvoiceInDocumentRow(tr) {
-  const td0 = tr.querySelector('td');
-  const clickable = td0?.querySelector('span');
-  if (!clickable) throw new Error('Klikací span (Faktura) nenalezen.');
-  clickable.click();
+  for (const candidate of getDocumentRowClickCandidates(tr)) {
+    if (dispatchMouseSequence(candidate)) return;
+  }
+  throw new Error('Klikací element faktury nenalezen.');
 }
 
 function extractRowsFromDocumentsTable() {
@@ -228,6 +270,26 @@ function getReactFiber(node) {
         return null;
       }
 
+      function parseOptionsPayload(data) {
+        if (!data?.downloadOptions) return null;
+        const pdf = (data.downloadOptions || []).find((item) => (item?.name || '').toUpperCase() === 'PDF');
+        const isdoc = (data.downloadOptions || []).find((item) => (item?.name || '').toUpperCase() === 'ISDOC');
+        const isdocOptionsUrl = isdoc?.onActionClick?.href || null;
+        const documentId = (() => {
+          try {
+            return isdocOptionsUrl ? new URL(isdocOptionsUrl).searchParams.get('documentIds') : null;
+          } catch {
+            return null;
+          }
+        })();
+        return {
+          ok: true,
+          pdfUrl: pdf?.onActionClick?.href || pdf?.href || null,
+          isdocOptionsUrl,
+          documentId
+        };
+      }
+
       async function runResolveOptions(detail) {
         const { requestId, invoiceNo } = detail || {};
         const row = findDocumentRowByInvoice(invoiceNo);
@@ -237,6 +299,8 @@ function getReactFiber(node) {
         }
 
         const originalFetch = window.fetch;
+        const originalOpen = XMLHttpRequest.prototype.open;
+        const originalSend = XMLHttpRequest.prototype.send;
         let resolved = false;
         const finish = (payload) => {
           if (resolved) return;
@@ -244,43 +308,48 @@ function getReactFiber(node) {
           emit({ requestId, ...payload });
         };
 
+        const inspectText = (text) => {
+          try {
+            const data = text ? JSON.parse(text) : null;
+            const parsed = parseOptionsPayload(data);
+            if (parsed) finish(parsed);
+          } catch {}
+        };
+
         window.fetch = async (...args) => {
           const response = await originalFetch(...args);
           try {
             const clone = response.clone();
-            const text = await clone.text();
-            const data = text ? JSON.parse(text) : null;
-            if (data?.downloadOptions) {
-              const pdf = (data.downloadOptions || []).find((item) => (item?.name || '').toUpperCase() === 'PDF');
-              const isdoc = (data.downloadOptions || []).find((item) => (item?.name || '').toUpperCase() === 'ISDOC');
-              const isdocOptionsUrl = isdoc?.onActionClick?.href || null;
-              const documentId = (() => {
-                try {
-                  return isdocOptionsUrl ? new URL(isdocOptionsUrl).searchParams.get('documentIds') : null;
-                } catch {
-                  return null;
-                }
-              })();
-              finish({
-                ok: true,
-                pdfUrl: pdf?.onActionClick?.href || pdf?.href || null,
-                isdocOptionsUrl,
-                documentId
-              });
-            }
+            inspectText(await clone.text());
           } catch {}
           return response;
         };
 
+        XMLHttpRequest.prototype.open = function(...args) {
+          this.__alzaUrl = args[1];
+          return originalOpen.apply(this, args);
+        };
+
+        XMLHttpRequest.prototype.send = function(...args) {
+          this.addEventListener('load', function() {
+            try {
+              inspectText(this.responseText);
+            } catch {}
+          }, { once: true });
+          return originalSend.apply(this, args);
+        };
+
         try {
           clickInvoiceInDocumentRow(row);
-          setTimeout(() => finish({ ok: false, error: 'Options endpoint se neodchytil.' }), 5000);
+          setTimeout(() => finish({ ok: false, error: 'Options endpoint se neodchytil po otevření modalu.' }), 7000);
         } catch (error) {
           finish({ ok: false, error: error?.message || 'Vyvolání options selhalo.' });
         } finally {
           setTimeout(() => {
             window.fetch = originalFetch;
-          }, 5500);
+            XMLHttpRequest.prototype.open = originalOpen;
+            XMLHttpRequest.prototype.send = originalSend;
+          }, 7500);
         }
       }
 
