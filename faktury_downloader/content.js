@@ -50,7 +50,15 @@ function isDocumentsPage() {
 
 function isAccountSwitcherPage() {
   const href = location.href.toLowerCase();
-  return href.includes("prompt=select_account") || href.includes("/external/login");
+  const host = location.host.toLowerCase();
+  const path = location.pathname.toLowerCase();
+  return (
+    href.includes("prompt=select_account") ||
+    href.includes("prompt%3dselect_account") ||
+    href.includes("/external/login") ||
+    (host.includes("identity.alza.cz") && path.includes("/account/select")) ||
+    !!document.querySelector(".account-box[data-sessionid], .account-box.active")
+  );
 }
 
 function buildDocumentsUrlForCycle() {
@@ -107,7 +115,12 @@ function advanceCycleIndex(config) {
 }
 
 function findHeaderContextMenuToggle() {
-  return document.querySelector("[data-testid='headerContextMenuToggleTitle']");
+  return (
+    document.querySelector("[data-testid='headerContextMenuToggle']") ||
+    document.querySelector("button[data-testid='headerContextMenuToggle']") ||
+    document.querySelector("[data-testid='headerContextMenuToggleTitle']")?.closest("button") ||
+    document.querySelector("[data-testid='headerContextMenuToggleAvatar']")?.closest("button")
+  );
 }
 
 function findSelectAccountLink() {
@@ -130,9 +143,36 @@ async function ensureHeaderMenuOpen() {
   return false;
 }
 
+function getAccountSwitcherBoxes() {
+  return Array.from(document.querySelectorAll(".account-box[data-sessionid], a .account-box, .account-box.active"));
+}
+
+function getAccountBoxEmail(box) {
+  if (!box) return "";
+  return (
+    box.querySelector(".user-info--email")?.textContent ||
+    box.querySelector("[data-testid='headerUserLogin']")?.textContent ||
+    ""
+  ).trim().toLowerCase();
+}
+
+function getActiveAccountBox() {
+  return document.querySelector(".account-box.active") || null;
+}
+
 function findAccountSwitchClickableByEmail(email) {
   const normalized = (email || "").trim().toLowerCase();
   if (!normalized) return null;
+
+  const boxes = getAccountSwitcherBoxes();
+  const matchedBox = boxes.find((box) => getAccountBoxEmail(box) === normalized);
+  if (matchedBox) return matchedBox.closest("a") || matchedBox;
+
+  const partialBox = boxes.find((box) => {
+    const text = (box.textContent || "").trim().toLowerCase();
+    return text.includes(normalized);
+  });
+  if (partialBox) return partialBox.closest("a") || partialBox;
 
   const containers = Array.from(document.querySelectorAll("main, [role='dialog'], body"));
   for (const container of containers) {
@@ -140,7 +180,7 @@ function findAccountSwitchClickableByEmail(email) {
     const exact = nodes.find((node) => (node.textContent || "").trim().toLowerCase() === normalized);
     const partial = nodes.find((node) => (node.textContent || "").trim().toLowerCase().includes(normalized));
     const candidate = exact || partial;
-    if (candidate) return candidate.closest("a, button, [role='button']") || candidate;
+    if (candidate) return candidate.closest("a, button, [role='button'], .account-box") || candidate;
   }
 
   return null;
@@ -167,12 +207,35 @@ async function selectTargetAccount(config) {
   const targetEmail = getTargetAccountEmail(config);
   const start = Date.now();
   while (Date.now() - start < 15000) {
+    const activeBox = getActiveAccountBox();
+    const activeEmail = getAccountBoxEmail(activeBox);
     const candidate = findAccountSwitchClickableByEmail(targetEmail);
+
     if (candidate) {
+      const candidateEmail = getAccountBoxEmail(candidate.matches?.(".account-box") ? candidate : candidate.querySelector?.(".account-box") || candidate.closest?.(".account-box"));
+      if (activeEmail && candidateEmail && activeEmail === candidateEmail) {
+        setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+        location.href = buildDocumentsUrlForCycle();
+        return true;
+      }
+
       setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
       candidate.click();
       return true;
     }
+
+    if (activeEmail) {
+      const fallbackEmail = config.accounts.find((email) => email !== activeEmail);
+      if (fallbackEmail) {
+        const fallbackCandidate = findAccountSwitchClickableByEmail(fallbackEmail);
+        if (fallbackCandidate) {
+          setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+          fallbackCandidate.click();
+          return true;
+        }
+      }
+    }
+
     await sleep(250);
   }
 
