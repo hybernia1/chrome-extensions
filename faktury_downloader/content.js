@@ -139,17 +139,27 @@ function buildAccountSwitcherUrl() {
   return url.toString();
 }
 
+function decodeHtmlEntities(value) {
+  if (!value || typeof value !== "string") return "";
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = value;
+  return textarea.value;
+}
+
 function getHeaderHydrationSelectAccountUrl() {
   const marker = document.querySelector("script[data-component='header'][data-initialstate]");
   const raw = marker?.getAttribute("data-initialstate");
   if (!raw) return null;
 
   try {
-    const parsed = JSON.parse(raw);
+    const decoded = decodeHtmlEntities(raw);
+    const parsed = JSON.parse(decoded);
     const webLink = parsed?.header?.mainNavigation?.selectAccount?.webLink;
     return typeof webLink === "string" && webLink ? webLink : null;
   } catch {
-    return null;
+    const decoded = decodeHtmlEntities(raw);
+    const match = decoded.match(/"selectAccount":\{.*?"webLink":"([^"]+)"/);
+    return match?.[1] || null;
   }
 }
 
