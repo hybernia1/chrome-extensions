@@ -122,6 +122,40 @@ async function requestIsdocAttachmentFromPage(invoiceNo) {
   return response.attachmentUrl;
 }
 
+async function enrichRowFromPage(row) {
+  if (row?.pdfUrl || row?.isdocOptionsUrl) return row;
+
+  const st = await getState();
+  if (!st.tabId) return row;
+
+  const response = await chrome.tabs.sendMessage(st.tabId, {
+    type: "ALZA_RESOLVE_ROW_OPTIONS",
+    invoiceNo: row.invoiceNo
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || `Nepodařilo se vyřešit options pro ${row.invoiceNo}.`);
+  }
+
+  const nextRow = {
+    ...row,
+    pdfUrl: response.pdfUrl || row.pdfUrl || null,
+    isdocOptionsUrl: response.isdocOptionsUrl || row.isdocOptionsUrl || null,
+    documentId: response.documentId || row.documentId || null
+  };
+
+  const nextRows = st.rows.map((item) => item.invoiceNo === row.invoiceNo ? nextRow : item);
+  await setState({ rows: nextRows });
+  await updateDone(row.invoiceNo, {
+    orderNo: row.orderNo,
+    pdfUrl: nextRow.pdfUrl,
+    isdocOptionsUrl: nextRow.isdocOptionsUrl,
+    documentId: nextRow.documentId
+  });
+  await pushStateToUI();
+  return nextRow;
+}
+
 function isTaskDoneForMode(rec, mode) {
   if (!rec) return false;
   if (mode === "pdf") return !!rec.pdf;
@@ -456,14 +490,19 @@ async function startNextIfIdle() {
         return;
       }
 
-      const row = st.rows.find((item) => item.invoiceNo === nextTask.invoiceNo);
+      let row = st.rows.find((item) => item.invoiceNo === nextTask.invoiceNo);
       if (!row) {
         await setStatus(`Řádek nenalezen: ${nextTask.invoiceNo}`);
         await pushStateToUI();
         continue;
       }
 
-      const rec = normalizeDoneRecord(st.done[row.invoiceNo]);
+      row = await enrichRowFromPage(row).catch(async (error) => {
+        await updateDone(row.invoiceNo, { lastError: error?.message || "Options enrichment failed" });
+        return row;
+      });
+
+      const rec = normalizeDoneRecord((await getState()).done[row.invoiceNo]);
       if (isTaskDoneForMode(rec, nextTask.mode)) continue;
 
       await setState({

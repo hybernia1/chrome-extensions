@@ -10,6 +10,40 @@ function findArchiveItems() {
     .filter((el) => el.querySelector('a[href*="/my-account/order-details-"]'));
 }
 
+function isDocumentsPage() {
+  return location.href.includes('documents');
+}
+
+function findDocumentRows() {
+  const table = document.querySelector('table');
+  if (!table) return [];
+  return Array.from(table.querySelectorAll('tbody tr'));
+}
+
+function findDocumentRowByInvoice(invoiceNo) {
+  return findDocumentRows().find((tr) => (tr.innerText || '').includes(invoiceNo)) || null;
+}
+
+function clickInvoiceInDocumentRow(tr) {
+  const td0 = tr.querySelector('td');
+  const clickable = td0?.querySelector('span');
+  if (!clickable) throw new Error('Klikací span (Faktura) nenalezen.');
+  clickable.click();
+}
+
+function extractRowsFromDocumentsTable() {
+  return findDocumentRows().map((tr) => {
+    const tds = tr.querySelectorAll('td');
+    if (tds.length < 2) return null;
+
+    const invoiceNo = digits((tds[0].innerText || '').trim());
+    const orderLink = tds[1].querySelector('a[title]');
+    const orderNo = digits(orderLink?.getAttribute('title') || '');
+
+    return invoiceNo && orderNo ? { invoiceNo, orderNo, documentId: null, pdfUrl: null, isdocOptionsUrl: null } : null;
+  }).filter(Boolean);
+}
+
 function getReactFiber(node) {
   if (!node) return null;
   const key = Object.keys(node).find((item) => item.startsWith('__reactFiber$'));
@@ -82,7 +116,12 @@ function extractRowsFromCards() {
   }).filter(Boolean);
 }
 
-function findCardByInvoice(invoiceNo) {
+function extractRows() {
+  return isDocumentsPage() ? extractRowsFromDocumentsTable() : extractRowsFromCards();
+}
+
+function findRowElementByInvoice(invoiceNo) {
+  if (isDocumentsPage()) return findDocumentRowByInvoice(invoiceNo);
   return findArchiveItems().find((card) => (card.textContent || '').includes(invoiceNo)) || null;
 }
 
@@ -98,7 +137,41 @@ function injectPageBridge() {
           .filter((el) => el.querySelector('a[href*="/my-account/order-details-"]'));
       }
 
-      function getReactFiber(node) {
+      function isDocumentsPage() {
+  return location.href.includes('documents');
+}
+
+function findDocumentRows() {
+  const table = document.querySelector('table');
+  if (!table) return [];
+  return Array.from(table.querySelectorAll('tbody tr'));
+}
+
+function findDocumentRowByInvoice(invoiceNo) {
+  return findDocumentRows().find((tr) => (tr.innerText || '').includes(invoiceNo)) || null;
+}
+
+function clickInvoiceInDocumentRow(tr) {
+  const td0 = tr.querySelector('td');
+  const clickable = td0?.querySelector('span');
+  if (!clickable) throw new Error('Klikací span (Faktura) nenalezen.');
+  clickable.click();
+}
+
+function extractRowsFromDocumentsTable() {
+  return findDocumentRows().map((tr) => {
+    const tds = tr.querySelectorAll('td');
+    if (tds.length < 2) return null;
+
+    const invoiceNo = digits((tds[0].innerText || '').trim());
+    const orderLink = tds[1].querySelector('a[title]');
+    const orderNo = digits(orderLink?.getAttribute('title') || '');
+
+    return invoiceNo && orderNo ? { invoiceNo, orderNo, documentId: null, pdfUrl: null, isdocOptionsUrl: null } : null;
+  }).filter(Boolean);
+}
+
+function getReactFiber(node) {
         if (!node) return null;
         const key = Object.keys(node).find((item) => item.startsWith('__reactFiber$'));
         return key ? node[key] : null;
@@ -153,6 +226,62 @@ function injectPageBridge() {
           }
         }
         return null;
+      }
+
+      async function runResolveOptions(detail) {
+        const { requestId, invoiceNo } = detail || {};
+        const row = findDocumentRowByInvoice(invoiceNo);
+        if (!row) {
+          emit({ requestId, ok: false, error: 'Řádek dokumentu nebyl nalezen.' });
+          return;
+        }
+
+        const originalFetch = window.fetch;
+        let resolved = false;
+        const finish = (payload) => {
+          if (resolved) return;
+          resolved = true;
+          emit({ requestId, ...payload });
+        };
+
+        window.fetch = async (...args) => {
+          const response = await originalFetch(...args);
+          try {
+            const clone = response.clone();
+            const text = await clone.text();
+            const data = text ? JSON.parse(text) : null;
+            if (data?.downloadOptions) {
+              const pdf = (data.downloadOptions || []).find((item) => (item?.name || '').toUpperCase() === 'PDF');
+              const isdoc = (data.downloadOptions || []).find((item) => (item?.name || '').toUpperCase() === 'ISDOC');
+              const isdocOptionsUrl = isdoc?.onActionClick?.href || null;
+              const documentId = (() => {
+                try {
+                  return isdocOptionsUrl ? new URL(isdocOptionsUrl).searchParams.get('documentIds') : null;
+                } catch {
+                  return null;
+                }
+              })();
+              finish({
+                ok: true,
+                pdfUrl: pdf?.onActionClick?.href || pdf?.href || null,
+                isdocOptionsUrl,
+                documentId
+              });
+            }
+          } catch {}
+          return response;
+        };
+
+        try {
+          clickInvoiceInDocumentRow(row);
+          setTimeout(() => finish({ ok: false, error: 'Options endpoint se neodchytil.' }), 5000);
+        } catch (error) {
+          finish({ ok: false, error: error?.message || 'Vyvolání options selhalo.' });
+        } finally {
+          setTimeout(() => {
+            window.fetch = originalFetch;
+          }, 5500);
+        }
       }
 
       async function runIsdoc(detail) {
@@ -216,11 +345,36 @@ function injectPageBridge() {
       window.addEventListener('ALZA_PAGE_RUN_ISDOC', (event) => {
         runIsdoc(event.detail);
       });
+
+      window.addEventListener('ALZA_PAGE_RESOLVE_OPTIONS', (event) => {
+        runResolveOptions(event.detail);
+      });
     })();
   `;
 
   (document.documentElement || document.head || document.body).appendChild(script);
   script.remove();
+}
+
+function resolveOptionsViaPage(invoiceNo) {
+  return new Promise((resolve, reject) => {
+    const requestId = `options-${Date.now()}-${++pageRequestSeq}`;
+    const timer = setTimeout(() => {
+      pageResolvers.delete(requestId);
+      reject(new Error('Page options bridge timeout.'));
+    }, 7000);
+
+    pageResolvers.set(requestId, (result) => {
+      clearTimeout(timer);
+      pageResolvers.delete(requestId);
+      if (result?.ok) resolve(result);
+      else reject(new Error(result?.error || 'Page bridge nevrátil options data.'));
+    });
+
+    window.dispatchEvent(new CustomEvent('ALZA_PAGE_RESOLVE_OPTIONS', {
+      detail: { requestId, invoiceNo }
+    }));
+  });
 }
 
 function resolveIsdocAttachmentViaPage(invoiceNo) {
@@ -412,8 +566,8 @@ function renderList(state) {
       if (act === 'retryIsdoc') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'isdoc' });
       if (act === 'retryBoth') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'both' });
       if (act === 'scroll') {
-        const card = findCardByInvoice(inv);
-        if (card) card.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const rowEl = findRowElementByInvoice(inv);
+        if (rowEl) rowEl.scrollIntoView({ block: 'center', inline: 'nearest' });
       }
     });
   });
@@ -421,12 +575,12 @@ function renderList(state) {
 
 async function attachRows() {
   ensureSidebar();
-  let rows = extractRowsFromCards();
+  let rows = extractRows();
 
   if (!rows.some((row) => row.pdfUrl || row.isdocOptionsUrl)) {
     for (let attempt = 0; attempt < 5; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 500));
-      rows = extractRowsFromCards();
+      rows = extractRows();
       if (rows.some((row) => row.pdfUrl || row.isdocOptionsUrl)) break;
     }
   }
@@ -452,6 +606,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     ensureSidebar();
     renderList(msg.state);
   }
+  if (msg?.type === 'ALZA_RESOLVE_ROW_OPTIONS') {
+    resolveOptionsViaPage(msg.invoiceNo)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || 'Options page bridge failed' }));
+    return true;
+  }
   if (msg?.type === 'ALZA_RESOLVE_ISDOC_ATTACHMENT') {
     resolveIsdocAttachmentViaPage(msg.invoiceNo)
       .then((attachmentUrl) => sendResponse({ ok: true, attachmentUrl }))
@@ -462,7 +622,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 (function init() {
-  if (!location.href.includes('orders')) return;
+  if (!location.href.includes('orders') && !location.href.includes('documents')) return;
   injectPageBridge();
   attachRows().catch(() => {});
 })();
