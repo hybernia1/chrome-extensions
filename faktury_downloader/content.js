@@ -385,8 +385,23 @@ async function selectTargetAccount(config = null) {
     config = await syncCycleConfigWithSwitcherAccounts(config);
   }
   const start = Date.now();
-  const targetEmail = config ? await getTargetAccountEmail(config) : "";
+  let targetEmail = config ? await getTargetAccountEmail(config) : "";
   while (Date.now() - start < 15000) {
+    if (targetEmail && isTargetAccountAlreadyActive(targetEmail) && config?.accounts?.length > 1) {
+      const activeEmail = getAccountBoxEmail(getActiveAccountBox());
+      const activeIndex = config.accounts.indexOf(activeEmail);
+      if (activeIndex >= 0) {
+        const nextIndex = (activeIndex + 1) % config.accounts.length;
+        targetEmail = config.accounts[nextIndex];
+        await setCycleState(config, {
+          index: nextIndex,
+          phase: "opening-switcher",
+          waitUntil: 0,
+          lastQueueIdleAt: 0
+        });
+      }
+    }
+
     if (targetEmail && isTargetAccountAlreadyActive(targetEmail)) {
       if (config) {
         await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
