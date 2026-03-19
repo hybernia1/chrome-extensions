@@ -85,13 +85,16 @@ function sortAccountRecords(accounts = []) {
   });
 }
 
-async function getSwitcherDiscoveredCycleConfig() {
-  const accounts = sortAccountRecords(getAccountRecordsFromSwitcher());
+async function getSwitcherDiscoveredCycleConfig(baseConfig = null) {
+  const discoveredAccounts = sortAccountRecords(getAccountRecordsFromSwitcher());
+  const accounts = baseConfig?.accounts?.length
+    ? mergeAccountRecords(baseConfig.accounts, discoveredAccounts)
+    : discoveredAccounts;
   if (!accounts.length) return null;
   const config = {
     accounts,
-    accountPauseMs: DEFAULT_ACCOUNT_PAUSE_MS,
-    roundPauseMs: DEFAULT_ROUND_PAUSE_MS
+    accountPauseMs: baseConfig?.accountPauseMs || DEFAULT_ACCOUNT_PAUSE_MS,
+    roundPauseMs: baseConfig?.roundPauseMs || DEFAULT_ROUND_PAUSE_MS
   };
   await persistAccountCycleConfig(config);
   return config;
@@ -213,7 +216,7 @@ async function getAccountCycleConfig() {
   }
 
   if (isAccountSwitcherPage()) {
-    return await getSwitcherDiscoveredCycleConfig();
+    return await getSwitcherDiscoveredCycleConfig(storedConfig);
   }
 
   return storedConfig;
