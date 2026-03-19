@@ -299,6 +299,12 @@ function getNextNonActiveAccountBox() {
   );
 }
 
+function isTargetAccountAlreadyActive(email) {
+  const normalized = (email || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return getAccountBoxEmail(getActiveAccountBox()) === normalized;
+}
+
 async function navigateToAccountSwitcher(config = null) {
   if (config) {
     await setCycleState(config, { phase: "opening-switcher" });
@@ -321,20 +327,32 @@ async function navigateToAccountSwitcher(config = null) {
 
 async function selectTargetAccount(config = null) {
   const start = Date.now();
+  const targetEmail = config ? await getTargetAccountEmail(config) : "";
   while (Date.now() - start < 15000) {
-    const nextBox = getNextNonActiveAccountBox();
-    if (nextBox) {
+    if (targetEmail && isTargetAccountAlreadyActive(targetEmail)) {
       if (config) {
         await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
       }
-      (nextBox.closest("a") || nextBox).click();
+      return true;
+    }
+
+    const targetNode = targetEmail
+      ? findAccountSwitchClickableByEmail(targetEmail)
+      : getNextNonActiveAccountBox();
+    if (targetNode) {
+      if (config) {
+        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+      }
+      (targetNode.closest("a") || targetNode).click();
       return true;
     }
 
     await sleep(250);
   }
 
-  throw new Error("Nepodařilo se najít další účet ve switcheru.");
+  throw new Error(targetEmail
+    ? `Nepodařilo se najít cílový účet ${targetEmail} ve switcheru.`
+    : "Nepodařilo se najít další účet ve switcheru.");
 }
 
 async function formatCycleStatus(config, targetEmail) {
