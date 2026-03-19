@@ -287,8 +287,22 @@ function findAccountSwitchClickableByEmail(email) {
   return null;
 }
 
-async function navigateToAccountSwitcher(config) {
-  await setCycleState(config, { phase: "opening-switcher" });
+function getNextNonActiveAccountBox() {
+  const boxes = getAccountSwitcherBoxes()
+    .filter((box) => box.matches?.(".account-box[data-sessionid], .account-box.active"));
+  const activeBox = getActiveAccountBox();
+  const activeIndex = boxes.findIndex((box) => box === activeBox);
+  return (
+    (activeIndex >= 0 ? boxes.slice(activeIndex + 1).find((box) => !box.classList.contains("active")) : null) ||
+    boxes.find((box) => !box.classList.contains("active")) ||
+    null
+  );
+}
+
+async function navigateToAccountSwitcher(config = null) {
+  if (config) {
+    await setCycleState(config, { phase: "opening-switcher" });
+  }
   const hydratedUrl = getHeaderHydrationSelectAccountUrl();
   if (hydratedUrl) {
     location.href = hydratedUrl;
@@ -305,19 +319,14 @@ async function navigateToAccountSwitcher(config) {
   throw new Error("Nepodařilo se otevřít header menu nebo najít odkaz Přepnout účet.");
 }
 
-async function selectTargetAccount(config) {
+async function selectTargetAccount(config = null) {
   const start = Date.now();
   while (Date.now() - start < 15000) {
-    const boxes = getAccountSwitcherBoxes()
-      .filter((box) => box.matches?.(".account-box[data-sessionid], .account-box.active"));
-    const activeBox = getActiveAccountBox();
-    const activeIndex = boxes.findIndex((box) => box === activeBox);
-    const nextBox =
-      (activeIndex >= 0 ? boxes.slice(activeIndex + 1).find((box) => !box.classList.contains("active")) : null) ||
-      boxes.find((box) => !box.classList.contains("active"));
-
+    const nextBox = getNextNonActiveAccountBox();
     if (nextBox) {
-      await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+      if (config) {
+        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+      }
       (nextBox.closest("a") || nextBox).click();
       return true;
     }
@@ -839,22 +848,27 @@ async function handleAccountCycleTick() {
 
 async function triggerAccountSwitchAfterQueueEmpty() {
   const config = await getAccountCycleConfig();
-  if (!config || !isDocumentsPage() || queueEmptyRedirectStarted) return;
+  if (!isDocumentsPage() || queueEmptyRedirectStarted) return;
 
   queueEmptyRedirectStarted = true;
   accountCycleBusy = true;
   try {
-    const currentEmail = await getTargetAccountEmail(config);
-    const next = await advanceCycleIndex(config);
-    const nextEmail = config.accounts[next.index];
+    if (config) {
+      const currentEmail = await getTargetAccountEmail(config);
+      const next = await advanceCycleIndex(config);
+      const nextEmail = config.accounts[next.index];
 
-    if (next.waitUntil && next.waitUntil > Date.now()) {
-      setStatusText(`Účet ${currentEmail}: vše staženo. Další kolo začne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
-      return;
+      if (next.waitUntil && next.waitUntil > Date.now()) {
+        setStatusText(`Účet ${currentEmail}: vše staženo. Další kolo začne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
+        return;
+      }
+
+      setStatusText(`Účet ${currentEmail}: vše staženo. Otevírám přepnutí na další účet ${nextEmail}…`);
+      await navigateToAccountSwitcher(config);
+    } else {
+      setStatusText("Queue prázdná. Otevírám přepnutí účtu bez uložené account konfigurace…");
+      await navigateToAccountSwitcher(null);
     }
-
-    setStatusText(`Účet ${currentEmail}: vše staženo. Otevírám přepnutí na další účet ${nextEmail}…`);
-    await navigateToAccountSwitcher(config);
   } catch (err) {
     queueEmptyRedirectStarted = false;
     ensureSidebar();
@@ -935,6 +949,14 @@ window.addEventListener("ALZA_PAGE_DOWNLOAD_URL_RESULT", (event) => {
 
   if (accountCycleConfig && loginSuccess && !onDocumentsPage) {
     location.href = buildDocumentsUrlForCycle(accountCycleConfig);
+    return;
+  }
+
+  if (isAccountSwitcherPage() && !accountCycleConfig) {
+    selectTargetAccount(null).catch((err) => {
+      ensureSidebar();
+      setStatusText(`Výběr dalšího účtu selhal: ${err?.message || "neznámá chyba"}`);
+    });
     return;
   }
 
