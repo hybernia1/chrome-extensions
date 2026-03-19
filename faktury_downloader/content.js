@@ -545,7 +545,9 @@ async function syncCycleConfigWithSwitcherAccounts(config) {
   const discoveredAccounts = getAccountRecordsFromSwitcher();
   if (!discoveredAccounts.length) return config;
 
+  const cycleState = await getCycleState(config);
   const currentAccounts = normalizeAccountRecordList(Array.isArray(config.accounts) ? config.accounts : []);
+  const currentTargetKey = getAccountKey(currentAccounts[cycleState.index] || currentAccounts[0]);
   const authoritativeAccounts = sortAccountRecords(discoveredAccounts);
   const changed = (
     authoritativeAccounts.length !== currentAccounts.length ||
@@ -558,37 +560,18 @@ async function syncCycleConfigWithSwitcherAccounts(config) {
 
   if (changed) {
     await persistAccountCycleConfig(nextConfig);
+    if (currentTargetKey) {
+      const preservedIndex = authoritativeAccounts.findIndex((account) => getAccountKey(account) === currentTargetKey);
+      if (preservedIndex >= 0 && preservedIndex !== cycleState.index) {
+        await setCycleState(nextConfig, {
+          index: preservedIndex,
+          waitUntil: cycleState.waitUntil || 0,
+          lastQueueIdleAt: cycleState.lastQueueIdleAt || 0
+        });
+      }
+    }
   }
   return nextConfig;
-}
-
-async function getNextStoredTargetAccount(config) {
-  const cycleState = await getCycleState(config);
-  const completed = new Set(cycleState.completedAccounts || []);
-  const checked = new Set(cycleState.checkedAccounts || []);
-  const orderedAccounts = normalizeAccountRecordList(config.accounts);
-  const currentByIndex = orderedAccounts[cycleState.index];
-  const nextAccount = (
-    currentByIndex && !completed.has(getAccountKey(currentByIndex)) && !checked.has(getAccountKey(currentByIndex))
-      ? currentByIndex
-      : null
-  ) || orderedAccounts.find((account) => {
-    const key = getAccountKey(account);
-    return !completed.has(key) && !checked.has(key);
-  }) || orderedAccounts.find((account) => !completed.has(getAccountKey(account))) || orderedAccounts[0];
-  if (!nextAccount) return null;
-
-  const nextIndex = config.accounts.findIndex((account) => getAccountKey(account) === getAccountKey(nextAccount));
-  if (nextIndex >= 0 && nextIndex !== cycleState.index) {
-    await setCycleState(config, {
-      index: nextIndex,
-      phase: "opening-switcher",
-      waitUntil: 0,
-      lastQueueIdleAt: 0
-    });
-  }
-
-  return normalizeAccountRecord(nextAccount);
 }
 
 async function navigateToAccountSwitcher(config = null) {
@@ -616,7 +599,7 @@ async function selectTargetAccount(config = null) {
     config = await syncCycleConfigWithSwitcherAccounts(config);
   }
   const start = Date.now();
-  let targetAccount = config ? await getNextStoredTargetAccount(config) : null;
+  let targetAccount = config ? await getTargetAccount(config) : null;
   while (Date.now() - start < 15000) {
     if (targetAccount && isTargetAccountAlreadyActive(targetAccount)) {
       if (config) {
