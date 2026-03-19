@@ -1,10 +1,13 @@
-const STATE_KEY = "alza_sidebar_state_v3";
+const STATE_KEY = "alza_sidebar_state_v4";
 const MAX_RETRIES_PER_ITEM = 3;
-const ISDOC_POLL_TIMEOUT_MS = 30000;
-const ISDOC_POLL_INTERVAL_MS = 1000;
+const EXEC_ACK_TIMEOUT_MS = 30000;
+const DOWNLOAD_TIMEOUT_MS = 180000;
 const UPLOAD_ENDPOINT = "http://10.3.109.33/faktury/alza/upload.php";
 
+let expectedCache = null;
 let runnerActive = false;
+let runSeq = 0;
+let ackWaiters = new Map();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -17,8 +20,7 @@ async function getState() {
     done: {},
     running: false,
     active: null,
-    queue: [],
-    apiStatus: { connected: false, checkedAt: null, message: "Neověřeno." }
+    queue: []
   };
 }
 
@@ -30,33 +32,42 @@ async function setState(patch) {
 }
 
 async function clearAllState() {
+  expectedCache = null;
+  ackWaiters.forEach((resolve) => resolve({ ok: false, error: "State cleared" }));
+  ackWaiters = new Map();
   await chrome.storage.session.remove(STATE_KEY);
-}
-
-function normalizeDoneRecord(prev = {}) {
-  return {
-    orderNo: prev.orderNo || null,
-    pdf: !!prev.pdf,
-    isdoc: !!prev.isdoc,
-    pdfUrl: prev.pdfUrl || null,
-    isdocOptionsUrl: prev.isdocOptionsUrl || null,
-    documentId: prev.documentId || null,
-    pdfServerPath: prev.pdfServerPath || null,
-    isdocServerPath: prev.isdocServerPath || null,
-    lastPdfResponse: prev.lastPdfResponse || null,
-    lastIsdocResponse: prev.lastIsdocResponse || null,
-    lastError: prev.lastError || null,
-    updatedAt: prev.updatedAt || Date.now()
-  };
 }
 
 async function updateDone(invoiceNo, patch) {
   const st = await getState();
-  const prev = normalizeDoneRecord(st.done[invoiceNo]);
+  const prev = st.done[invoiceNo] || {
+    pdf: false,
+    isdoc: false,
+    orderNo: null,
+    updatedAt: Date.now(),
+    lastError: null,
+    pdfPath: null,
+    pdfDownloadId: null,
+    isdocPath: null,
+    isdocDownloadId: null,
+    pdfServerPath: null,
+    isdocServerPath: null
+  };
   const nextRec = { ...prev, ...patch, updatedAt: Date.now() };
   const done = { ...st.done, [invoiceNo]: nextRec };
   await setState({ done });
   return nextRec;
+}
+
+function toStatePatchFromDownloadItem(item) {
+  if (!item) return null;
+  const file = (item.filename || "").replaceAll("\\", "/");
+  return {
+    path: file,
+    id: item.id,
+    url: item.finalUrl || item.url || null,
+    filename: item.filename || null
+  };
 }
 
 async function sendToTab(tabId, msg) {
@@ -77,93 +88,62 @@ async function setStatus(text) {
   await sendToTab(st.tabId, { type: "ALZA_STATUS", text });
 }
 
-async function checkUploadEndpointHealth() {
-  try {
-    const response = await fetch(UPLOAD_ENDPOINT, {
-      method: "OPTIONS"
-    });
-
-    const message = response.ok || response.status === 204 || response.status === 405
-      ? `API dosažitelné (HTTP ${response.status}).`
-      : `API odpovědělo HTTP ${response.status}.`;
-
-    const apiStatus = {
-      connected: response.ok || response.status === 204 || response.status === 405,
-      checkedAt: Date.now(),
-      message
-    };
-
-    await setState({ apiStatus });
-    return apiStatus;
-  } catch (error) {
-    const apiStatus = {
-      connected: false,
-      checkedAt: Date.now(),
-      message: error?.message || "Upload API není dostupné."
-    };
-    await setState({ apiStatus });
-    return apiStatus;
-  }
+function isPdfUrl(url) {
+  if (!url) return false;
+  return url.includes("pdf.alza.cz") || url.endsWith(".pdf");
 }
 
-async function requestIsdocAttachmentFromPage(invoiceNo) {
+chrome.tabs.onUpdated.addListener(async (updatedTabId, changeInfo, tab) => {
+  if (!changeInfo.url && changeInfo.status !== "complete") return;
   const st = await getState();
-  if (!st.tabId) throw new Error("Aktivní karta pro page bridge není dostupná.");
+  if (!st.tabId || !st.running) return;
 
-  const response = await chrome.tabs.sendMessage(st.tabId, {
-    type: "ALZA_RESOLVE_ISDOC_ATTACHMENT",
-    invoiceNo
-  });
-
-  if (!response?.ok || !response?.attachmentUrl) {
-    throw new Error(response?.error || "Page bridge nevrátil attachment URL.");
+  const url = tab.url || changeInfo.url || "";
+  if (isPdfUrl(url) && updatedTabId !== st.tabId) {
+    try { await chrome.tabs.remove(updatedTabId); } catch {}
+    try {
+      await chrome.tabs.update(st.tabId, { active: true });
+      if (st.windowId != null) await chrome.windows.update(st.windowId, { focused: true });
+    } catch {}
   }
+});
 
-  return response.attachmentUrl;
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  if (!expectedCache) return;
+
+  const fn = (item.filename || "").toLowerCase();
+  const mime = (item.mime || "").toLowerCase();
+  const url = (item.finalUrl || item.url || "").toLowerCase();
+
+  const pdf = fn.endsWith(".pdf") || mime.includes("pdf") || url.includes(".pdf");
+  const isdoc = fn.includes(".isdoc") || url.includes(".isdoc");
+
+  if (!pdf && !isdoc) return;
+
+  let ext = "bin";
+  if (pdf) ext = "pdf";
+  else if (fn.includes(".isdocx") || url.includes(".isdocx")) ext = "isdocx";
+  else if (fn.includes(".isdoc") || url.includes(".isdoc")) ext = "isdoc";
+
+  const base = pdf ? "faktury/invoice" : "faktury/isdoc";
+  const filename = `${base}/${expectedCache.orderNo}/${expectedCache.invoiceNo}.${ext}`;
+
+  suggest({ filename, conflictAction: "overwrite" });
+});
+
+function buildTargetPrefixes(orderNo, invoiceNo) {
+  const pdfPrefix = `faktury/invoice/${orderNo}/${invoiceNo}.`;
+  const isdocPrefix = `faktury/isdoc/${orderNo}/${invoiceNo}.`;
+  return { pdfPrefix, isdocPrefix };
 }
 
-async function enrichRowFromPage(row) {
-  return row;
+function filenameHasPrefix(item, prefix) {
+  const f = (item.filename || "").replaceAll("\\", "/");
+  return f.includes(`/${prefix}`) || f.includes(prefix);
 }
 
-async function storeResolvedRowOptions(invoiceNo, result) {
-  const st = await getState();
-  const row = (st.rows || []).find((item) => item.invoiceNo === invoiceNo);
-  if (!row) throw new Error(`Řádek ${invoiceNo} nebyl nalezen.`);
-
-  const nextRow = {
-    ...row,
-    pdfUrl: result?.pdfUrl || row.pdfUrl || null,
-    isdocOptionsUrl: result?.isdocOptionsUrl || row.isdocOptionsUrl || null,
-    documentId: result?.documentId || row.documentId || null
-  };
-
-  const nextRows = st.rows.map((item) => item.invoiceNo === invoiceNo ? nextRow : item);
-  await setState({ rows: nextRows });
-  await updateDone(invoiceNo, {
-    orderNo: nextRow.orderNo,
-    pdfUrl: nextRow.pdfUrl,
-    isdocOptionsUrl: nextRow.isdocOptionsUrl,
-    documentId: nextRow.documentId,
-    lastError: null
-  });
-  await pushStateToUI();
-  return nextRow;
-}
-
-function isRowReadyForMode(row, mode) {
-  if (mode === "pdf") return !!row?.pdfUrl;
-  if (mode === "isdoc") return !!row?.isdocOptionsUrl;
-  return !!row?.pdfUrl && !!row?.isdocOptionsUrl;
-}
-
-function buildManualModalMessage(row, mode) {
-  const target = mode === "pdf"
-    ? "PDF URL"
-    : mode === "isdoc"
-      ? "ISDOC options"
-      : "PDF/ISDOC metadata";
-  return `Chybí ${target} pro ${row.invoiceNo}. V sidebaru použijte 'Arm manual modal' a pak klikněte ručně na fakturu v Alza tabulce.`;
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isTaskDoneForMode(rec, mode) {
@@ -180,48 +160,176 @@ function expandTaskByMode(invoiceNo, mode, attempts = 0) {
       { invoiceNo, mode: "isdoc", attempts }
     ];
   }
+
   return [{ invoiceNo, mode, attempts }];
 }
 
-async function buildQueueFromRows(rows, mode) {
-  const st = await getState();
-  const queue = [];
+async function findLatestCompletedDownloads(orderNo, invoiceNo) {
+  const { pdfPrefix, isdocPrefix } = buildTargetPrefixes(orderNo, invoiceNo);
+  const pdfRegex = `(^|[\\/\\\\])${escapeRegExp(pdfPrefix)}[pP][dD][fF]$`;
+  const isdocRegex = `(^|[\\/\\\\])${escapeRegExp(isdocPrefix)}([iI][sS][dD][oO][cC]|[iI][sS][dD][oO][cC][xX])$`;
 
-  for (const row of rows) {
-    const rec = normalizeDoneRecord(st.done[row.invoiceNo]);
-    const tasks = expandTaskByMode(row.invoiceNo, mode, 0);
-    for (const task of tasks) {
-      if (!isTaskDoneForMode(rec, task.mode)) queue.push(task);
+  try {
+    const [pdfItems, isdocItems] = await Promise.all([
+      chrome.downloads.search({ filenameRegex: pdfRegex, exists: true, orderBy: ["-startTime"], limit: 20 }),
+      chrome.downloads.search({ filenameRegex: isdocRegex, exists: true, orderBy: ["-startTime"], limit: 20 })
+    ]);
+
+    const pdfItem = pdfItems.find((i) => i.state === "complete") || pdfItems[0] || null;
+    const isdocItem = isdocItems.find((i) => i.state === "complete") || isdocItems[0] || null;
+
+    return { pdfItem, isdocItem };
+  } catch {
+    const items = await chrome.downloads.search({ exists: true, orderBy: ["-startTime"], limit: 1000 });
+    let pdfItem = null;
+    let isdocItem = null;
+    for (const it of items) {
+      if (!pdfItem && filenameHasPrefix(it, pdfPrefix)) pdfItem = it;
+      if (!isdocItem && filenameHasPrefix(it, isdocPrefix)) isdocItem = it;
+      if (pdfItem && isdocItem) break;
     }
+    return { pdfItem, isdocItem };
   }
-
-  return queue;
 }
 
-function getFileExtensionFromUrl(url, fallback) {
-  try {
-    const pathname = new URL(url).pathname;
-    const ext = pathname.split(".").pop();
-    if (ext && ext !== pathname) return ext.toLowerCase();
-  } catch {}
-  return fallback;
+async function syncDoneWithDisk(row) {
+  const st = await getState();
+  const rec = st.done[row.invoiceNo] || {};
+  const found = await findLatestCompletedDownloads(row.orderNo, row.invoiceNo);
+
+  const pdfInfo = toStatePatchFromDownloadItem(found.pdfItem);
+  const isdocInfo = toStatePatchFromDownloadItem(found.isdocItem);
+
+  const patch = {
+    orderNo: row.orderNo,
+    pdf: !!rec.pdf || !!pdfInfo,
+    isdoc: !!rec.isdoc || !!isdocInfo,
+    pdfPath: pdfInfo?.path || rec.pdfPath || null,
+    pdfDownloadId: pdfInfo?.id || rec.pdfDownloadId || null,
+    pdfDownloadUrl: pdfInfo?.url || rec.pdfDownloadUrl || null,
+    isdocPath: isdocInfo?.path || rec.isdocPath || null,
+    isdocDownloadId: isdocInfo?.id || rec.isdocDownloadId || null,
+    isdocDownloadUrl: isdocInfo?.url || rec.isdocDownloadUrl || null,
+    pdfServerPath: rec.pdfServerPath || null,
+    isdocServerPath: rec.isdocServerPath || null
+  };
+
+  if (patch.pdf && patch.isdoc) patch.lastError = null;
+
+  await updateDone(row.invoiceNo, patch);
+  return { ...rec, ...patch };
+}
+
+async function resyncDoneForRows(rows) {
+  const done = {};
+  for (const row of rows) {
+    const found = await findLatestCompletedDownloads(row.orderNo, row.invoiceNo);
+    const pdfInfo = toStatePatchFromDownloadItem(found.pdfItem);
+    const isdocInfo = toStatePatchFromDownloadItem(found.isdocItem);
+
+    done[row.invoiceNo] = {
+      orderNo: row.orderNo,
+      pdf: !!pdfInfo,
+      isdoc: !!isdocInfo,
+      pdfPath: pdfInfo?.path || null,
+      pdfDownloadId: pdfInfo?.id || null,
+      pdfDownloadUrl: pdfInfo?.url || null,
+      isdocPath: isdocInfo?.path || null,
+      isdocDownloadId: isdocInfo?.id || null,
+      isdocDownloadUrl: isdocInfo?.url || null,
+      pdfServerPath: null,
+      isdocServerPath: null,
+      lastError: null,
+      updatedAt: Date.now()
+    };
+  }
+  return done;
+}
+
+async function pollForCompletion(active, timeoutMs = DOWNLOAD_TIMEOUT_MS) {
+  const started = Date.now();
+  const { pdfPrefix, isdocPrefix } = buildTargetPrefixes(active.orderNo, active.invoiceNo);
+
+  while (Date.now() - started < timeoutMs) {
+    const st = await getState();
+    if (!st.running) return { aborted: true };
+    if (!st.active || st.active.invoiceNo !== active.invoiceNo) return { aborted: true };
+
+    const items = await chrome.downloads.search({ limit: 80, orderBy: ["-startTime"] });
+
+    let pdfDone = false;
+    let isdocDone = false;
+
+    for (const it of items) {
+      if (it.state !== "complete") continue;
+      if (filenameHasPrefix(it, pdfPrefix)) pdfDone = true;
+      if (filenameHasPrefix(it, isdocPrefix)) isdocDone = true;
+    }
+
+    const rec = st.done[active.invoiceNo];
+    if (rec?.pdf) pdfDone = true;
+    if (rec?.isdoc) isdocDone = true;
+
+    const finished =
+      active.mode === "pdf" ? pdfDone :
+      active.mode === "isdoc" ? isdocDone :
+      (pdfDone && isdocDone);
+
+    await updateDone(active.invoiceNo, {
+      orderNo: active.orderNo,
+      pdf: pdfDone || (rec?.pdf || false),
+      isdoc: isdocDone || (rec?.isdoc || false),
+      pdfPath: rec?.pdfPath || null,
+      pdfDownloadId: rec?.pdfDownloadId || null,
+      pdfDownloadUrl: rec?.pdfDownloadUrl || null,
+      isdocPath: rec?.isdocPath || null,
+      isdocDownloadId: rec?.isdocDownloadId || null,
+      isdocDownloadUrl: rec?.isdocDownloadUrl || null,
+      pdfServerPath: rec?.pdfServerPath || null,
+      isdocServerPath: rec?.isdocServerPath || null,
+      lastError: null
+    });
+    await pushStateToUI();
+
+    if (finished) return { pdfDone, isdocDone };
+    await sleep(1000);
+  }
+
+  return { timeout: true };
+}
+
+function nextRunId() {
+  runSeq += 1;
+  return `run-${Date.now()}-${runSeq}`;
+}
+
+function withExecAckWaiter(runId, timeoutMs = EXEC_ACK_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      ackWaiters.delete(runId);
+      resolve({ ok: false, error: "Execution ack timeout" });
+    }, timeoutMs);
+
+    ackWaiters.set(runId, (result) => {
+      clearTimeout(timer);
+      ackWaiters.delete(runId);
+      resolve(result || { ok: false, error: "Unknown execution result" });
+    });
+  });
+}
+
+function resolveExecAck(runId, result) {
+  if (!runId) return;
+  const waiter = ackWaiters.get(runId);
+  if (waiter) waiter(result);
 }
 
 async function fetchBlob(url) {
   const response = await fetch(url, { credentials: "include" });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} při načítání ${url}`);
-  }
-
+  if (!response.ok) throw new Error(`HTTP ${response.status} při načítání ${url}`);
   const blob = await response.blob();
-  if (!blob || blob.size === 0) {
-    throw new Error("Stažený soubor je prázdný.");
-  }
-
-  return {
-    blob,
-    contentType: response.headers.get("content-type") || blob.type || "application/octet-stream"
-  };
+  if (!blob || blob.size === 0) throw new Error("Stažený soubor je prázdný.");
+  return blob;
 }
 
 async function uploadBlob({ blob, filename, invoiceNo, orderNo, type, sourceUrl }) {
@@ -257,211 +365,43 @@ async function uploadBlob({ blob, filename, invoiceNo, orderNo, type, sourceUrl 
   return data;
 }
 
-function getPdfUrl(row) {
-  return row?.pdfUrl || null;
-}
-
-function getDocumentId(row) {
-  if (row?.documentId) return row.documentId;
-  if (!row?.isdocOptionsUrl) return null;
+function inferFilename(downloadUrl, fallbackName) {
   try {
-    return new URL(row.isdocOptionsUrl).searchParams.get("documentIds");
-  } catch {
-    return null;
-  }
+    const pathname = new URL(downloadUrl).pathname;
+    const name = pathname.split("/").pop();
+    if (name) return name;
+  } catch {}
+  return fallbackName;
 }
 
-function getUserIdFromOptionsUrl(optionsUrl) {
-  if (!optionsUrl) return null;
-  const match = optionsUrl.match(/\/api\/users\/(\d+)\//);
-  return match ? match[1] : null;
-}
+async function uploadDownloadedArtifact(row, mode) {
+  const st = await getState();
+  const rec = st.done[row.invoiceNo] || {};
+  const type = mode === "pdf" ? "pdf" : "isdoc";
+  const existingServerPath = mode === "pdf" ? rec.pdfServerPath : rec.isdocServerPath;
+  const sourceUrl = mode === "pdf" ? rec.pdfDownloadUrl : rec.isdocDownloadUrl;
+  const path = mode === "pdf" ? rec.pdfPath : rec.isdocPath;
 
-function findAttachmentHrefInObject(value) {
-  if (!value) return null;
+  if (existingServerPath || !sourceUrl) return;
 
-  if (typeof value === "string") {
-    return /\/api\/invoices\/v1\/attachment\//.test(value) ? value : null;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findAttachmentHrefInObject(item);
-      if (found) return found;
-    }
-    return null;
-  }
-
-  if (typeof value === "object") {
-    for (const nested of Object.values(value)) {
-      const found = findAttachmentHrefInObject(nested);
-      if (found) return found;
-    }
-  }
-
-  return null;
-}
-
-async function fetchJsonIfAvailable(url) {
-  const response = await fetch(url, { credentials: "include" });
-  const text = await response.text();
-  let data = null;
-
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
-  }
-
-  return { response, data, text };
-}
-
-async function waitForIsdocAttachmentUrl({ userId, requestId, country = "cz", timeoutMs = ISDOC_POLL_TIMEOUT_MS }) {
-  const started = Date.now();
-  const candidates = [
-    `https://webapi.alza.cz/api/users/${userId}/v1/invoices/download/requests/${requestId}?country=${country}`,
-    `https://webapi.alza.cz/api/users/${userId}/v1/invoices/download/requests/${requestId}`,
-    `https://webapi.alza.cz/api/users/${userId}/v1/invoices/download/requests/${requestId}/result?country=${country}`,
-    `https://webapi.alza.cz/api/users/${userId}/v1/invoices/download/requests/${requestId}/result`,
-    `https://webapi.alza.cz/api/users/${userId}/v1/invoices/download/requests/${requestId}/attachment?country=${country}`,
-    `https://webapi.alza.cz/api/users/${userId}/v1/invoices/download/requests/${requestId}/attachment`
-  ];
-
-  while (Date.now() - started < timeoutMs) {
-    for (const candidate of candidates) {
-      try {
-        const { response, data, text } = await fetchJsonIfAvailable(candidate);
-        if (!response.ok) continue;
-
-        const href = findAttachmentHrefInObject(data) || findAttachmentHrefInObject(text);
-        if (href) return href;
-      } catch {}
-    }
-
-    await sleep(ISDOC_POLL_INTERVAL_MS);
-  }
-
-  throw new Error(`ISDOC attachment pro requestId ${requestId} nebyl v nalezených request endpoint URL odpovědích dohledán.`);
-}
-
-async function resolveIsdocUpload(row) {
-  const optionsUrl = row?.isdocOptionsUrl;
-  if (!optionsUrl) throw new Error("ISDOC options URL nenalezena.");
-
-  const optionsResponse = await fetch(optionsUrl, { credentials: "include" });
-  if (!optionsResponse.ok) {
-    throw new Error(`ISDOC options selhaly: HTTP ${optionsResponse.status}`);
-  }
-
-  const optionsData = await optionsResponse.json();
-  const option = (optionsData?.downloadOptions || []).find((item) => (item?.name || "").toUpperCase() === "ISDOC");
-  const form = option?.onActionClick?.form;
-  const actionHref = option?.onActionClick?.href;
-
-  if (!form || !actionHref) {
-    throw new Error("ISDOC form akce nebyla nalezena.");
-  }
-
-  const payload = {};
-  for (const field of form.value || []) {
-    payload[field.name] = Array.isArray(field.value) && field.value.length === 1 ? field.value[0] : field.value;
-  }
-
-  const requestResponse = await fetch(actionHref, {
-    method: form.method || "POST",
-    headers: { "content-type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify(payload)
-  });
-
-  const requestData = await requestResponse.json().catch(() => null);
-  if (!requestResponse.ok) {
-    throw new Error(requestData?.error || `ISDOC request selhal: HTTP ${requestResponse.status}`);
-  }
-
-  const requestId = requestData?.requestId;
-  const userId = getUserIdFromOptionsUrl(optionsUrl);
-  if (!requestId || !userId) {
-    throw new Error("ISDOC request sice proběhl, ale chybí requestId nebo userId pro dohledání attachmentu.");
-  }
-
-  const country = (() => {
-    try {
-      return new URL(optionsUrl).searchParams.get("country") || "cz";
-    } catch {
-      return "cz";
-    }
-  })();
-
-  let attachmentUrl = null;
-  try {
-    attachmentUrl = await waitForIsdocAttachmentUrl({ userId, requestId, country });
-  } catch (pollError) {
-    attachmentUrl = await requestIsdocAttachmentFromPage(row.invoiceNo).catch(() => { throw pollError; });
-  }
-  const { blob } = await fetchBlob(attachmentUrl);
+  const fallbackExt = mode === "pdf" ? "pdf" : "isdoc";
+  const filename = inferFilename(sourceUrl, `${row.invoiceNo}.${fallbackExt}`);
+  const blob = await fetchBlob(sourceUrl);
   const uploadResponse = await uploadBlob({
     blob,
-    filename: `${row.invoiceNo}.isdoc`,
+    filename,
     invoiceNo: row.invoiceNo,
     orderNo: row.orderNo,
-    type: "isdoc",
-    sourceUrl: attachmentUrl
+    type,
+    sourceUrl
   });
 
-  return {
-    ...uploadResponse,
-    attachmentUrl,
-    requestId
-  };
-}
+  await updateDone(row.invoiceNo, mode === "pdf"
+    ? { pdfServerPath: uploadResponse?.path || null, lastError: null }
+    : { isdocServerPath: uploadResponse?.path || null, lastError: null });
 
-async function executeTask(row, mode) {
-  if (mode === "pdf") {
-    const pdfUrl = getPdfUrl(row);
-    if (!pdfUrl) throw new Error("PDF URL nenalezena.");
-
-    const ext = getFileExtensionFromUrl(pdfUrl, "pdf");
-    const filename = `${row.invoiceNo}.${ext}`;
-    const { blob } = await fetchBlob(pdfUrl);
-    const uploadResponse = await uploadBlob({
-      blob,
-      filename,
-      invoiceNo: row.invoiceNo,
-      orderNo: row.orderNo,
-      type: "pdf",
-      sourceUrl: pdfUrl
-    });
-
-    await updateDone(row.invoiceNo, {
-      orderNo: row.orderNo,
-      documentId: getDocumentId(row),
-      pdfUrl,
-      isdocOptionsUrl: row.isdocOptionsUrl || null,
-      pdf: true,
-      pdfServerPath: uploadResponse?.path || null,
-      lastPdfResponse: uploadResponse,
-      lastError: null
-    });
-    return;
-  }
-
-  if (mode === "isdoc") {
-    const uploadResponse = await resolveIsdocUpload(row);
-    await updateDone(row.invoiceNo, {
-      orderNo: row.orderNo,
-      documentId: getDocumentId(row),
-      pdfUrl: row.pdfUrl || null,
-      isdocOptionsUrl: row.isdocOptionsUrl || null,
-      isdoc: true,
-      isdocServerPath: uploadResponse?.path || null,
-      lastIsdocResponse: uploadResponse,
-      lastError: null
-    });
-    return;
-  }
-
-  throw new Error(`Neznámý mód ${mode}`);
+  await setStatus(`Upload hotov: ${row.invoiceNo} (${mode})${path ? ` • ${path}` : ""}`);
+  await pushStateToUI();
 }
 
 async function requeueWithRetry(task, reason) {
@@ -475,7 +415,8 @@ async function requeueWithRetry(task, reason) {
   }
 
   const st = await getState();
-  await setState({ queue: [...(st.queue || []), { ...task, attempts }] });
+  const queuedTask = { ...task, attempts };
+  await setState({ queue: [...(st.queue || []), queuedTask] });
   await setStatus(`Retry ${attempts}/${MAX_RETRIES_PER_ITEM - 1}: ${task.invoiceNo} (${task.mode})`);
   await pushStateToUI();
 }
@@ -489,66 +430,130 @@ async function startNextIfIdle() {
       const st = await getState();
       if (!st.running || !st.tabId) return;
 
+      if (st.active) {
+        const recoveredQueue = [{
+          invoiceNo: st.active.invoiceNo,
+          mode: st.active.mode,
+          attempts: st.active.attempts || 0
+        }, ...(st.queue || [])];
+        await setState({ active: null, queue: recoveredQueue });
+        await setStatus(`Obnovuji zaseknutou položku: ${st.active.invoiceNo} (${st.active.mode})`);
+        await pushStateToUI();
+        continue;
+      }
+
       const queue = [...(st.queue || [])];
       const nextTask = queue.shift();
       await setState({ queue });
 
       if (!nextTask) {
-        await setState({ active: null, running: false });
-        await setStatus("Fronta dokončena.");
+        await setState({ running: false });
+        await setStatus("Queue prázdná.");
         await pushStateToUI();
         return;
       }
 
-      let row = st.rows.find((item) => item.invoiceNo === nextTask.invoiceNo);
+      const row = st.rows.find((r) => r.invoiceNo === nextTask.invoiceNo);
       if (!row) {
         await setStatus(`Řádek nenalezen: ${nextTask.invoiceNo}`);
         await pushStateToUI();
         continue;
       }
 
-      row = await enrichRowFromPage(row).catch(async (error) => {
-        await updateDone(row.invoiceNo, { lastError: error?.message || "Options enrichment failed" });
-        return row;
-      });
-
-      if (!isRowReadyForMode(row, nextTask.mode)) {
-        const message = buildManualModalMessage(row, nextTask.mode);
-        await updateDone(row.invoiceNo, { lastError: message });
-        await setStatus(message);
+      const recFromDisk = await syncDoneWithDisk(row);
+      if (isTaskDoneForMode(recFromDisk, nextTask.mode)) {
+        await setStatus(`Přeskakuji (už staženo): ${row.invoiceNo} (${nextTask.mode})`);
         await pushStateToUI();
+        try {
+          await uploadDownloadedArtifact(row, nextTask.mode);
+        } catch (error) {
+          await updateDone(row.invoiceNo, { lastError: error?.message || "Upload selhal." });
+          await pushStateToUI();
+        }
         continue;
       }
 
-      const rec = normalizeDoneRecord((await getState()).done[row.invoiceNo]);
-      if (isTaskDoneForMode(rec, nextTask.mode)) continue;
+      if (nextTask.mode === "both") {
+        const expanded = expandTaskByMode(nextTask.invoiceNo, "both", nextTask.attempts || 0);
+        await setState({ queue: [...expanded, ...queue] });
+        continue;
+      }
 
-      await setState({
-        active: {
-          invoiceNo: row.invoiceNo,
-          orderNo: row.orderNo,
-          mode: nextTask.mode,
-          attempts: nextTask.attempts || 0,
-          startedAt: Date.now()
-        }
-      });
-      await setStatus(`Zpracovávám: ${row.invoiceNo} (${nextTask.mode})`);
+      const runId = nextRunId();
+      const active = {
+        invoiceNo: row.invoiceNo,
+        orderNo: row.orderNo,
+        mode: nextTask.mode,
+        runId,
+        attempts: nextTask.attempts || 0,
+        startedAt: Date.now()
+      };
+      await setState({ active });
+      expectedCache = { invoiceNo: row.invoiceNo, orderNo: row.orderNo };
+
+      await updateDone(row.invoiceNo, { orderNo: row.orderNo, lastError: null });
+      await setStatus(`Spouštím: ${row.invoiceNo} (${nextTask.mode})`);
       await pushStateToUI();
 
-      try {
-        await executeTask(row, nextTask.mode);
+      const ackPromise = withExecAckWaiter(runId, EXEC_ACK_TIMEOUT_MS);
+      await sendToTab(st.tabId, { type: "ALZA_RUN_ROW", invoiceNo: row.invoiceNo, mode: nextTask.mode, runId });
+      const execAck = await ackPromise;
+
+      const afterAck = await getState();
+      if (!afterAck.running || !afterAck.active || afterAck.active.runId !== runId) return;
+
+      if (!execAck?.ok) {
         await setState({ active: null });
-        await setStatus(`Hotovo: ${row.invoiceNo} (${nextTask.mode})`);
-        await pushStateToUI();
-        await sleep(250);
-      } catch (error) {
-        await setState({ active: null });
-        await requeueWithRetry(nextTask, error?.message || "Execution failed");
+        expectedCache = null;
+        await requeueWithRetry(nextTask, execAck?.error || "Execution failed");
+        continue;
       }
+
+      const pollResult = await pollForCompletion(active, DOWNLOAD_TIMEOUT_MS);
+      const st2 = await getState();
+      if (!st2.running) return;
+      if (pollResult?.aborted) return;
+
+      if (pollResult?.timeout) {
+        await setState({ active: null });
+        expectedCache = null;
+        await requeueWithRetry(nextTask, `Timeout (${active.mode})`);
+        continue;
+      }
+
+      await setState({ active: null });
+      expectedCache = null;
+      await syncDoneWithDisk(row);
+
+      try {
+        await uploadDownloadedArtifact(row, nextTask.mode);
+      } catch (error) {
+        await updateDone(row.invoiceNo, { lastError: error?.message || "Upload selhal." });
+      }
+
+      await setStatus(`Hotovo: ${active.invoiceNo} (${active.mode})`);
+      await pushStateToUI();
+      await sleep(250);
     }
   } finally {
     runnerActive = false;
   }
+}
+
+async function buildQueueFromRows(rows, mode) {
+  const queue = [];
+
+  for (const row of rows) {
+    const rec = await syncDoneWithDisk(row);
+    const tasks = expandTaskByMode(row.invoiceNo, mode, 0);
+    for (const task of tasks) {
+      if (!isTaskDoneForMode(rec, task.mode)) {
+        queue.push(task);
+      }
+    }
+  }
+
+  return queue;
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -560,7 +565,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       const st = await getState();
       await setState({ tabId, windowId, rows: msg.rows || st.rows || [] });
-      await checkUploadEndpointHealth();
       await pushStateToUI();
       return sendResponse({ ok: true });
     }
@@ -570,23 +574,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return sendResponse({ ok: true, state: st });
     }
 
-    if (msg.type === "ALZA_STORE_ROW_OPTIONS") {
-      try {
-        const row = await storeResolvedRowOptions(msg.invoiceNo, msg.result || {});
-        return sendResponse({ ok: true, row });
-      } catch (error) {
-        return sendResponse({ ok: false, error: error?.message || "Nepodařilo se uložit options metadata." });
-      }
-    }
-
     if (msg.type === "ALZA_START_ALL") {
       const st = await getState();
       if (!st.tabId) return sendResponse({ ok: false, error: "No tab" });
 
-      await checkUploadEndpointHealth();
-      const queue = await buildQueueFromRows(st.rows, "both");
-      await setState({ running: true, queue });
-      await setStatus(`Start all: ${queue.length} položek`);
+      const q = await buildQueueFromRows(st.rows, "both");
+      await setState({ running: true, queue: q });
+      await setStatus(`Start all: ${q.length} položek`);
       await pushStateToUI();
       startNextIfIdle().catch(() => {});
       return sendResponse({ ok: true });
@@ -596,16 +590,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const st = await getState();
       if (!st.tabId) return sendResponse({ ok: false, error: "No tab" });
 
-      await checkUploadEndpointHealth();
-      const queue = await buildQueueFromRows(st.rows, "isdoc");
-      await setState({ running: true, queue });
-      await setStatus(`Start ISDOC: ${queue.length} položek`);
+      const q = await buildQueueFromRows(st.rows, "isdoc");
+      await setState({ running: true, queue: q });
+      await setStatus(`Start ISDOC: ${q.length} položek`);
       await pushStateToUI();
       startNextIfIdle().catch(() => {});
       return sendResponse({ ok: true });
     }
 
     if (msg.type === "ALZA_STOP") {
+      expectedCache = null;
+      ackWaiters.forEach((resolve) => resolve({ ok: false, error: "Stopped" }));
+      ackWaiters = new Map();
       await setState({ running: false, active: null, queue: [] });
       await setStatus("Stop.");
       await pushStateToUI();
@@ -615,43 +611,64 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "ALZA_CLEAR_DATA") {
       const stBefore = await getState();
       const rowsToKeep = stBefore.rows || [];
-      const tabId = sender?.tab?.id || stBefore.tabId;
-      const windowId = sender?.tab?.windowId || stBefore.windowId;
 
       await clearAllState();
-      await chrome.storage.session.set({
-        [STATE_KEY]: {
-          tabId,
-          windowId,
-          rows: rowsToKeep,
-          done: {},
-          running: false,
-          active: null,
-          queue: [],
-          apiStatus: { connected: false, checkedAt: null, message: "Neověřeno." }
-        }
-      });
-      await sendToTab(tabId, { type: "ALZA_STATUS", text: "Lokální stav smazán." });
+      const done = await resyncDoneForRows(rowsToKeep);
+      const tabId = sender?.tab?.id;
+      const windowId = sender?.tab?.windowId;
+      if (tabId) {
+        await chrome.storage.session.set({
+          [STATE_KEY]: {
+            tabId,
+            windowId,
+            rows: rowsToKeep,
+            done,
+            running: false,
+            active: null,
+            queue: []
+          }
+        });
+      }
+      await sendToTab(tabId, { type: "ALZA_STATUS", text: "Fronta smazána, stav synchronizován z disku." });
       await sendToTab(tabId, { type: "ALZA_STATE", state: await getState() });
       return sendResponse({ ok: true });
     }
 
-    if (msg.type === "ALZA_PING_UPLOAD_API") {
-      const apiStatus = await checkUploadEndpointHealth();
-      await pushStateToUI();
-      return sendResponse({ ok: true, apiStatus });
+    if (msg.type === "ALZA_OPEN_DOWNLOADED") {
+      const st = await getState();
+      const { invoiceNo, mode } = msg;
+      const rec = st.done[invoiceNo] || {};
+      const id = mode === "pdf" ? rec.pdfDownloadId : rec.isdocDownloadId;
+      if (!id && id !== 0) return sendResponse({ ok: false, error: "Soubor nebyl v historii nalezen." });
+      try {
+        await chrome.downloads.show(id);
+        return sendResponse({ ok: true });
+      } catch {
+        return sendResponse({ ok: false, error: "Soubor nelze otevřít v systému." });
+      }
     }
 
     if (msg.type === "ALZA_RETRY") {
       const st = await getState();
-      if (!st.tabId) return sendResponse({ ok: false, error: "No tab" });
+      if (!st.tabId) return sendResponse({ ok: false });
 
       const { invoiceNo, mode } = msg;
+      if (!invoiceNo || !mode) return sendResponse({ ok: false });
+
       const retryTasks = expandTaskByMode(invoiceNo, mode, 0);
-      await setState({ running: true, queue: [...retryTasks, ...(st.queue || [])] });
+      const q = [...retryTasks, ...(st.queue || [])];
+      await setState({ running: true, queue: q });
+
       await setStatus(`Retry queued: ${invoiceNo} (${mode})`);
       await pushStateToUI();
       startNextIfIdle().catch(() => {});
+      return sendResponse({ ok: true });
+    }
+
+    if (msg.type === "ALZA_RUN_ROW_RESULT") {
+      const st = await getState();
+      if (!st.active || st.active.runId !== msg.runId) return sendResponse({ ok: false });
+      resolveExecAck(msg.runId, { ok: !!msg.ok, error: msg.error || null });
       return sendResponse({ ok: true });
     }
 
