@@ -831,6 +831,7 @@ function ensureSidebar() {
       </div>
       <div class="alzaSbBtns">
         <button id="alzaSbClear">Clear data</button>
+        <button id="alzaSbResetCycle">Reset cycle</button>
       </div>
       <div id="alzaSbStatus" class="alzaSbStatus">-</div>
     </div>
@@ -901,6 +902,10 @@ function ensureSidebar() {
   document.getElementById("alzaSbClear").addEventListener("click", async () => {
     await chrome.runtime.sendMessage({ type: "ALZA_CLEAR_DATA" });
     await attachRows();
+  });
+
+  document.getElementById("alzaSbResetCycle").addEventListener("click", async () => {
+    await resetAccountCycleNow();
   });
 }
 
@@ -1168,6 +1173,32 @@ async function scheduleAccountCycleIfRequested() {
   }, 2000);
 
   handleAccountCycleTick().catch(() => {});
+}
+
+async function resetAccountCycleNow() {
+  const config = await getAccountCycleConfig();
+  if (!config) {
+    ensureSidebar();
+    setStatusText("Reset cyklu: není k dispozici uložená konfigurace účtů.");
+    return;
+  }
+
+  queueEmptyRedirectStarted = false;
+  accountCycleBusy = false;
+  await setCycleState(config, {
+    index: 0,
+    phase: "ensure-account",
+    waitUntil: 0,
+    lastQueueIdleAt: 0,
+    completedAccounts: []
+  });
+
+  ensureSidebar();
+  setStatusText("Cyklus účtů resetován. Spouštím nové kolo okamžitě…");
+  handleAccountCycleTick().catch((err) => {
+    ensureSidebar();
+    setStatusText(`Reset cyklu selhal: ${err?.message || "neznámá chyba"}`);
+  });
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
