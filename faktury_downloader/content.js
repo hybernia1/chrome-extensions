@@ -945,27 +945,14 @@ async function handleAccountCycleTick() {
 
 async function triggerAccountSwitchAfterQueueEmpty() {
   const config = await getAccountCycleConfig();
+  if (config) return false;
   if (!isDocumentsPage() || queueEmptyRedirectStarted) return;
 
   queueEmptyRedirectStarted = true;
   accountCycleBusy = true;
   try {
-    if (config) {
-      const currentEmail = await getTargetAccountEmail(config);
-      const next = await advanceCycleIndex(config);
-      const nextEmail = config.accounts[next.index];
-
-      if (next.waitUntil && next.waitUntil > Date.now()) {
-        setStatusText(`Účet ${currentEmail}: vše staženo. Další kolo proběhne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
-        return;
-      }
-
-      setStatusText(`Účet ${currentEmail}: vše staženo. Otevírám přepnutí na další účet ${nextEmail}…`);
-      await navigateToAccountSwitcher(config);
-    } else {
-      setStatusText("Queue prázdná. Otevírám přepnutí účtu bez uložené account konfigurace…");
-      await navigateToAccountSwitcher(null);
-    }
+    setStatusText("Queue prázdná. Otevírám přepnutí účtu bez uložené account konfigurace…");
+    await navigateToAccountSwitcher(null);
   } catch (err) {
     queueEmptyRedirectStarted = false;
     ensureSidebar();
@@ -991,11 +978,18 @@ chrome.runtime.onMessage.addListener((msg) => {
     ensureSidebar();
     setStatusText(msg.text);
     if (typeof msg.text === "string" && msg.text.startsWith("Queue prázdná")) {
-      setStatusText("Queue prázdná. Zkouším otevřít přepnutí účtu…");
-      triggerAccountSwitchAfterQueueEmpty().catch((err) => {
-        ensureSidebar();
-        setStatusText(`Přechod na další účet selhal: ${err?.message || "neznámá chyba"}`);
-      });
+      (async () => {
+        const config = await getAccountCycleConfig();
+        if (config) {
+          queueEmptyRedirectStarted = false;
+          return;
+        }
+        setStatusText("Queue prázdná. Zkouším otevřít přepnutí účtu…");
+        triggerAccountSwitchAfterQueueEmpty().catch((err) => {
+          ensureSidebar();
+          setStatusText(`Přechod na další účet selhal: ${err?.message || "neznámá chyba"}`);
+        });
+      })().catch(() => {});
     }
   }
   if (msg?.type === "ALZA_STATE") {
