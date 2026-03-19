@@ -30,7 +30,7 @@ async function getStoredAccountCycleConfig() {
     if (!config || !Array.isArray(config.accounts) || !config.accounts.length) return null;
     const accounts = config.accounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
     if (!accounts.length) return null;
-    const pauseMs = Number.isFinite(config.pauseMs) && config.pauseMs > 0 ? config.pauseMs : 10 * 60 * 1000;
+    const pauseMs = Number.isFinite(config.pauseMs) && config.pauseMs > 0 ? config.pauseMs : 30 * 60 * 1000;
     return { accounts, pauseMs };
   } catch {
     return null;
@@ -84,6 +84,13 @@ function getAutoRefreshIntervalMs() {
   return minutes * 60 * 1000;
 }
 
+function mergeAccountEmailLists(existingAccounts = [], discoveredAccounts = []) {
+  return Array.from(new Set([
+    ...existingAccounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
+    ...discoveredAccounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+  ]));
+}
+
 async function getAccountCycleConfig() {
   const params = new URLSearchParams(location.search);
   const paramAccounts = (params.get("alzaAccounts") || "")
@@ -93,11 +100,9 @@ async function getAccountCycleConfig() {
   const storedConfig = await getStoredAccountCycleConfig();
 
   if (paramAccounts.length) {
-    const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || "10", 10);
-    const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : 10;
-    const accounts = storedConfig?.accounts?.length
-      ? Array.from(new Set([...storedConfig.accounts, ...paramAccounts]))
-      : paramAccounts;
+    const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || "30", 10);
+    const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : 30;
+    const accounts = mergeAccountEmailLists(storedConfig?.accounts || [], paramAccounts);
     const config = {
       accounts,
       pauseMs: pauseMinutes * 60 * 1000
@@ -334,25 +339,26 @@ async function syncCycleConfigWithSwitcherAccounts(config) {
   if (!discoveredAccounts.length) return config;
 
   const currentAccounts = Array.isArray(config.accounts) ? config.accounts : [];
+  const mergedAccounts = mergeAccountEmailLists(currentAccounts, discoveredAccounts);
   const changed = (
-    discoveredAccounts.length !== currentAccounts.length ||
-    discoveredAccounts.some((email, index) => email !== currentAccounts[index])
+    mergedAccounts.length !== currentAccounts.length ||
+    mergedAccounts.some((email, index) => email !== currentAccounts[index])
   );
   if (!changed) return config;
 
   const activeEmail = getAccountBoxEmail(getActiveAccountBox());
   const nextConfig = {
     ...config,
-    accounts: discoveredAccounts
+    accounts: mergedAccounts
   };
 
   await persistAccountCycleConfig(nextConfig);
 
   const currentState = await getCycleState(nextConfig);
   const nextIndex = currentAccounts[currentState.index]
-    ? discoveredAccounts.indexOf(currentAccounts[currentState.index])
+    ? mergedAccounts.indexOf(currentAccounts[currentState.index])
     : -1;
-  const fallbackIndex = activeEmail ? discoveredAccounts.indexOf(activeEmail) : -1;
+  const fallbackIndex = activeEmail ? mergedAccounts.indexOf(activeEmail) : -1;
   await setCycleState(nextConfig, {
     index: nextIndex >= 0 ? nextIndex : Math.max(fallbackIndex, 0)
   });
@@ -433,7 +439,7 @@ async function formatCycleStatus(config, targetEmail) {
   const position = `${state.index + 1}/${config.accounts.length}`;
   const waitMs = Math.max((state.waitUntil || 0) - Date.now(), 0);
   if (waitMs > 0) {
-    return `Účet ${position}: ${targetEmail} • čekám ${Math.ceil(waitMs / 1000)} s na další kolo…`;
+    return `Účet ${position}: ${targetEmail} • další kolo proběhne za ${Math.ceil(waitMs / 1000)} s…`;
   }
   return `Účet ${position}: ${targetEmail}`;
 }
@@ -921,7 +927,7 @@ async function handleAccountCycleTick() {
       const next = await advanceCycleIndex(config);
       const nextEmail = config.accounts[next.index];
       if (next.waitUntil && next.waitUntil > Date.now()) {
-        setStatusText(`Účet ${targetEmail}: hotovo. Další kolo začne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
+        setStatusText(`Účet ${targetEmail}: hotovo. Další kolo proběhne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
         return;
       }
 
@@ -950,7 +956,7 @@ async function triggerAccountSwitchAfterQueueEmpty() {
       const nextEmail = config.accounts[next.index];
 
       if (next.waitUntil && next.waitUntil > Date.now()) {
-        setStatusText(`Účet ${currentEmail}: vše staženo. Další kolo začne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
+        setStatusText(`Účet ${currentEmail}: vše staženo. Další kolo proběhne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
         return;
       }
 
