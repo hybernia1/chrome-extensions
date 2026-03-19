@@ -7,6 +7,7 @@ let autoStartAttempted = false;
 let autoRefreshTimer = null;
 let accountCycleTimer = null;
 let accountCycleBusy = false;
+let queueEmptyRedirectStarted = false;
 
 const ACCOUNT_CYCLE_STATE_KEY = "alzaAccountCycleStateV1";
 const ACCOUNT_CYCLE_CONFIG_KEY = "alzaAccountCycleConfigV1";
@@ -780,6 +781,7 @@ async function handleAccountCycleTick() {
 
     if (cycleState.phase === "processing") {
       if (bgState?.running) {
+        queueEmptyRedirectStarted = false;
         await setCycleState(config, { lastQueueIdleAt: 0 });
         setStatusText(`${await formatCycleStatus(config, targetEmail)} • fronta běží…`);
         return;
@@ -822,13 +824,11 @@ async function handleAccountCycleTick() {
 
 async function triggerAccountSwitchAfterQueueEmpty() {
   const config = await getAccountCycleConfig();
-  if (!config || !isDocumentsPage() || accountCycleBusy) return;
+  if (!config || !isDocumentsPage() || queueEmptyRedirectStarted) return;
 
+  queueEmptyRedirectStarted = true;
   accountCycleBusy = true;
   try {
-    const cycleState = await getCycleState(config);
-    if (cycleState.phase !== "processing") return;
-
     const currentEmail = await getTargetAccountEmail(config);
     const next = await advanceCycleIndex(config);
     const nextEmail = config.accounts[next.index];
@@ -841,6 +841,7 @@ async function triggerAccountSwitchAfterQueueEmpty() {
     setStatusText(`Účet ${currentEmail}: vše staženo. Otevírám přepnutí na další účet ${nextEmail}…`);
     await navigateToAccountSwitcher(config);
   } catch (err) {
+    queueEmptyRedirectStarted = false;
     ensureSidebar();
     setStatusText(`Přechod na další účet selhal: ${err?.message || "neznámá chyba"}`);
   } finally {
