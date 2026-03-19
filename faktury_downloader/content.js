@@ -86,23 +86,34 @@ function getAutoRefreshIntervalMs() {
 
 async function getAccountCycleConfig() {
   const params = new URLSearchParams(location.search);
-  const accounts = (params.get("alzaAccounts") || "")
+  const paramAccounts = (params.get("alzaAccounts") || "")
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
+  const storedConfig = await getStoredAccountCycleConfig();
 
-  if (accounts.length) {
+  if (paramAccounts.length) {
     const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || "10", 10);
     const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : 10;
+    const accounts = storedConfig?.accounts?.length
+      ? Array.from(new Set([...storedConfig.accounts, ...paramAccounts]))
+      : paramAccounts;
     const config = {
       accounts,
       pauseMs: pauseMinutes * 60 * 1000
     };
-    await persistAccountCycleConfig(config);
+    if (
+      !storedConfig ||
+      storedConfig.pauseMs !== config.pauseMs ||
+      storedConfig.accounts.length !== config.accounts.length ||
+      storedConfig.accounts.some((email, index) => email !== config.accounts[index])
+    ) {
+      await persistAccountCycleConfig(config);
+    }
     return config;
   }
 
-  return await getStoredAccountCycleConfig();
+  return storedConfig;
 }
 
 function isDocumentsPage() {
