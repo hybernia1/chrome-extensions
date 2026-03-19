@@ -15,6 +15,13 @@ DEFAULT_DOCUMENTS_URL = "https://www.alza.cz/my-account/documents.htm"
 DEFAULT_POLL_INTERVAL = 5
 DEFAULT_IDLE_TIMEOUT = 180
 DEFAULT_STARTUP_GRACE = 120
+DEFAULT_CYCLE_PAUSE_MINUTES = 10
+
+
+def parse_accounts_file(path: Path) -> list[str]:
+    content = path.read_text(encoding="utf-8")
+    raw_values = content.replace(",", "\n").splitlines()
+    return [value.strip().lower() for value in raw_values if value.strip()]
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +43,23 @@ def parse_args() -> argparse.Namespace:
         "--documents-url",
         default=DEFAULT_DOCUMENTS_URL,
         help=f"Základní URL stránky dokladů (default: {DEFAULT_DOCUMENTS_URL}).",
+    )
+    parser.add_argument(
+        "--account-email",
+        action="append",
+        default=[],
+        help="E-mail účtu pro account-cycling. Lze zadat víckrát v pořadí, v jakém se mají účty obcházet.",
+    )
+    parser.add_argument(
+        "--accounts-file",
+        type=Path,
+        help="Soubor se seznamem účtů (jeden e-mail na řádek nebo čárkami oddělený seznam).",
+    )
+    parser.add_argument(
+        "--cycle-pause-minutes",
+        type=int,
+        default=DEFAULT_CYCLE_PAUSE_MINUTES,
+        help=f"Pauza mezi celými koly účtů (default: {DEFAULT_CYCLE_PAUSE_MINUTES}).",
     )
     parser.add_argument(
         "--poll-interval",
@@ -73,11 +97,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_documents_url(base_url: str) -> str:
+    return build_documents_url_with_accounts(base_url, [], DEFAULT_CYCLE_PAUSE_MINUTES)
+
+
+def build_documents_url_with_accounts(base_url: str, account_emails: list[str], cycle_pause_minutes: int) -> str:
     parsed = parse.urlsplit(base_url)
     query = parse.parse_qs(parsed.query, keep_blank_values=True)
     query["alzaAutoStart"] = ["1"]
     if "alzaAutoMode" not in query:
         query["alzaAutoMode"] = ["both"]
+    if account_emails:
+        query["alzaAccounts"] = [",".join(account_emails)]
+        query["alzaCyclePauseMinutes"] = [str(max(cycle_pause_minutes, 1))]
     return parse.urlunsplit(parsed._replace(query=parse.urlencode(query, doseq=True)))
 
 
@@ -138,7 +169,12 @@ def main() -> int:
     if args.browser_command:
         print("[WARN] --browser-command je zatím jen příprava do budoucna; používám default browser.")
 
-    documents_url = build_documents_url(args.documents_url)
+    account_emails = [email.strip().lower() for email in args.account_email if email and email.strip()]
+    if args.accounts_file:
+        account_emails.extend(parse_accounts_file(args.accounts_file.resolve()))
+    account_emails = list(dict.fromkeys(account_emails))
+
+    documents_url = build_documents_url_with_accounts(args.documents_url, account_emails, args.cycle_pause_minutes)
     print(f"[INFO] Otevírám browser na {documents_url}")
     opened = webbrowser.open(documents_url, new=2)
     if not opened:
@@ -148,6 +184,14 @@ def main() -> int:
     started_at = time.monotonic()
     last_activity_at = started_at
     previous_snapshot = snapshot_local_files(work_root)
+    keep_running = bool(account_emails)
+
+    if keep_running:
+        print(
+            "[INFO] Multi-account režim aktivní pro účty: "
+            + ", ".join(account_emails)
+            + ". Idle timeout se v tomto režimu nevynucuje a běh pokračuje stále dokola."
+        )
 
     while True:
         before_count = count_local_files(work_root)
@@ -172,11 +216,12 @@ def main() -> int:
             last_activity_at = time.monotonic()
         previous_snapshot = current_snapshot
 
-        elapsed = time.monotonic() - started_at
-        idle_for = time.monotonic() - last_activity_at
-        if elapsed >= args.startup_grace and idle_for >= args.idle_timeout:
-            print(f"[INFO] Idle timeout {args.idle_timeout}s vypršel, workflow končí.")
-            return 0
+        if not keep_running:
+            elapsed = time.monotonic() - started_at
+            idle_for = time.monotonic() - last_activity_at
+            if elapsed >= args.startup_grace and idle_for >= args.idle_timeout:
+                print(f"[INFO] Idle timeout {args.idle_timeout}s vypršel, workflow končí.")
+                return 0
 
         time.sleep(max(args.poll_interval, 1))
 
