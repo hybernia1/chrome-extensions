@@ -25,6 +25,12 @@ function request_string(string $key): string
     return is_string($value) ? trim($value) : '';
 }
 
+function request_param_string(string $key): string
+{
+    $value = $_REQUEST[$key] ?? '';
+    return is_string($value) ? trim($value) : '';
+}
+
 function sanitize_digits(string $value): string
 {
     return preg_replace('/\D+/', '', $value) ?? '';
@@ -61,6 +67,53 @@ function allowed_extension(string $type, string $originalName, string $mimeType)
     }
 
     return 'isdoc';
+}
+
+function find_existing_relative_path(string $baseDir, string $orderNo, string $invoiceNo, string $type): ?string
+{
+    $targetRoot = $type === 'pdf' ? 'invoice' : 'isdoc';
+    $targetDir = $baseDir . DIRECTORY_SEPARATOR . $targetRoot . DIRECTORY_SEPARATOR . $orderNo;
+    if (!is_dir($targetDir)) {
+        return null;
+    }
+
+    $patterns = $type === 'pdf'
+        ? [$invoiceNo . '.pdf']
+        : [$invoiceNo . '.isdoc', $invoiceNo . '.isdocx'];
+
+    foreach ($patterns as $filename) {
+        $candidate = $targetDir . DIRECTORY_SEPARATOR . $filename;
+        if (is_file($candidate)) {
+            return $targetRoot . '/' . $orderNo . '/' . $filename;
+        }
+    }
+
+    return null;
+}
+
+$baseDir = __DIR__;
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    $invoiceNo = sanitize_digits(request_param_string('invoiceNo'));
+    $orderNo = sanitize_digits(request_param_string('orderNo'));
+    $type = strtolower(request_param_string('type'));
+
+    if ($invoiceNo === '' || $orderNo === '' || !in_array($type, ['pdf', 'isdoc'], true)) {
+        respond(422, [
+            'ok' => false,
+            'error' => 'Pro kontrolu existence chybí invoiceNo, orderNo nebo type.',
+        ]);
+    }
+
+    $existingPath = find_existing_relative_path($baseDir, $orderNo, $invoiceNo, $type);
+    respond(200, [
+        'ok' => true,
+        'exists' => $existingPath !== null,
+        'path' => $existingPath,
+        'invoiceNo' => $invoiceNo,
+        'orderNo' => $orderNo,
+        'type' => $type,
+    ]);
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -111,7 +164,6 @@ $originalName = is_string($file['name'] ?? null) ? $file['name'] : '';
 $mimeType = is_string($file['type'] ?? null) ? $file['type'] : '';
 $extension = allowed_extension($type, $originalName, $mimeType);
 
-$baseDir = __DIR__;
 $targetRoot = $type === 'pdf' ? 'invoice' : 'isdoc';
 $targetDir = $baseDir . DIRECTORY_SEPARATOR . $targetRoot . DIRECTORY_SEPARATOR . $orderNo;
 $targetFile = $targetDir . DIRECTORY_SEPARATOR . $invoiceNo . '.' . $extension;

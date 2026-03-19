@@ -365,6 +365,32 @@ async function uploadBlob({ blob, filename, invoiceNo, orderNo, type, sourceUrl 
   return data;
 }
 
+async function checkServerArtifact(row, mode) {
+  const type = mode === "pdf" ? "pdf" : "isdoc";
+  const url = new URL(UPLOAD_ENDPOINT);
+  url.searchParams.set("invoiceNo", row.invoiceNo);
+  url.searchParams.set("orderNo", row.orderNo);
+  url.searchParams.set("type", type);
+
+  const response = await fetch(url.toString(), { method: "GET" });
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(data?.error || `Kontrola existence vrátila HTTP ${response.status}`);
+  }
+
+  return {
+    exists: !!data?.exists,
+    path: data?.path || null
+  };
+}
+
 function inferFilename(downloadUrl, fallbackName) {
   try {
     const pathname = new URL(downloadUrl).pathname;
@@ -383,6 +409,13 @@ async function uploadDownloadedArtifact(row, mode) {
   const path = mode === "pdf" ? rec.pdfPath : rec.isdocPath;
 
   if (existingServerPath) return;
+  const serverCheck = await checkServerArtifact(row, mode);
+  if (serverCheck.exists) {
+    await updateDone(row.invoiceNo, mode === "pdf"
+      ? { pdfServerPath: serverCheck.path, lastError: null }
+      : { isdocServerPath: serverCheck.path, lastError: null });
+    return;
+  }
   if (!sourceUrl) {
     throw new Error(`Upload ${mode.toUpperCase()} nelze spustit: Chrome download historie nevrátila zdrojové URL.`);
   }
@@ -542,7 +575,16 @@ async function buildQueueFromRows(rows, mode) {
 
   for (const row of rows) {
     const tasks = expandTaskByMode(row.invoiceNo, mode, 0);
-    queue.push(...tasks);
+    for (const task of tasks) {
+      const serverCheck = await checkServerArtifact(row, task.mode).catch(() => null);
+      if (serverCheck?.exists) {
+        await updateDone(row.invoiceNo, task.mode === "pdf"
+          ? { orderNo: row.orderNo, pdf: true, pdfServerPath: serverCheck.path, lastError: null }
+          : { orderNo: row.orderNo, isdoc: true, isdocServerPath: serverCheck.path, lastError: null });
+        continue;
+      }
+      queue.push(task);
+    }
   }
 
   return queue;
