@@ -125,10 +125,10 @@ async function captureDownloadUrl(mode, trigger, timeoutMs = 4000) {
       resolve(null);
     }, timeoutMs + 500);
 
-    pageResolvers.set(requestId, (url) => {
+    pageResolvers.set(requestId, (payload) => {
       clearTimeout(timer);
       pageResolvers.delete(requestId);
-      resolve(url || null);
+      resolve(payload || { url: null });
     });
 
     window.dispatchEvent(new CustomEvent("ALZA_PAGE_CAPTURE_DOWNLOAD_URL", {
@@ -140,7 +140,7 @@ async function captureDownloadUrl(mode, trigger, timeoutMs = 4000) {
       .catch(() => {
         clearTimeout(timer);
         pageResolvers.delete(requestId);
-        resolve(null);
+        resolve({ url: null });
       });
   });
 }
@@ -149,16 +149,20 @@ async function clickDownloads(modal, mode) {
   const pdfBtn = findButtonByExactText(modal, "PDF");
   const isdocBtn = findButtonByExactText(modal, "ISDOC");
   if (!pdfBtn || !isdocBtn) throw new Error("Nenalezeno PDF/ISDOC tlačítko.");
-  const result = { pdfDownloadUrl: null, isdocDownloadUrl: null };
+  const result = { pdfDownloadUrl: null, isdocDownloadUrl: null, isdocDataUrl: null, isdocFilename: null };
 
   if (mode === "pdf" || mode === "both") {
-    result.pdfDownloadUrl = await captureDownloadUrl("pdf", () => pdfBtn.click());
+    const pdfCapture = await captureDownloadUrl("pdf", () => pdfBtn.click());
+    result.pdfDownloadUrl = pdfCapture?.url || null;
     await sleep(250);
     await closeDownloadStartedModal(await waitForDownloadStartedModal(8000));
   }
 
   if (mode === "isdoc" || mode === "both") {
-    result.isdocDownloadUrl = await captureDownloadUrl("isdoc", () => isdocBtn.click());
+    const isdocCapture = await captureDownloadUrl("isdoc", () => isdocBtn.click());
+    result.isdocDownloadUrl = isdocCapture?.url || null;
+    result.isdocDataUrl = isdocCapture?.dataUrl || null;
+    result.isdocFilename = isdocCapture?.filename || null;
     await sleep(250);
     await closeDownloadStartedModal(await waitForDownloadStartedModal(8000));
   }
@@ -403,7 +407,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 window.addEventListener("ALZA_PAGE_DOWNLOAD_URL_RESULT", (event) => {
   const detail = event.detail || {};
   const resolver = pageResolvers.get(detail.requestId);
-  if (resolver) resolver(detail.url || null);
+  if (resolver) resolver(detail);
 });
 
 (function init() {

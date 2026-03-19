@@ -8,6 +8,7 @@ let expectedCache = null;
 let runnerActive = false;
 let runSeq = 0;
 let ackWaiters = new Map();
+let capturedBinaryByInvoice = new Map();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -80,6 +81,34 @@ async function pushStateToUI() {
   const st = await getState();
   if (!st.tabId) return;
   await sendToTab(st.tabId, { type: "ALZA_STATE", state: st });
+}
+
+function dataUrlToBlob(dataUrl) {
+  const match = /^data:([^;,]+)?(?:;base64)?,(.*)$/i.exec(dataUrl || "");
+  if (!match) throw new Error("Neplatný data URL formát.");
+  const mime = match[1] || "application/octet-stream";
+  const bytes = atob(match[2]);
+  const array = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) array[i] = bytes.charCodeAt(i);
+  return new Blob([array], { type: mime });
+}
+
+async function hydrateServerState(rows) {
+  for (const row of rows) {
+    const [pdfCheck, isdocCheck] = await Promise.all([
+      checkServerArtifact(row, "pdf").catch(() => null),
+      checkServerArtifact(row, "isdoc").catch(() => null)
+    ]);
+
+    await updateDone(row.invoiceNo, {
+      orderNo: row.orderNo,
+      pdf: !!pdfCheck?.exists,
+      isdoc: !!isdocCheck?.exists,
+      pdfServerPath: pdfCheck?.path || null,
+      isdocServerPath: isdocCheck?.path || null,
+      lastError: null
+    });
+  }
 }
 
 async function setStatus(text) {
@@ -407,6 +436,7 @@ async function uploadDownloadedArtifact(row, mode) {
   const existingServerPath = mode === "pdf" ? rec.pdfServerPath : rec.isdocServerPath;
   const sourceUrl = mode === "pdf" ? rec.pdfDownloadUrl : rec.isdocDownloadUrl;
   const path = mode === "pdf" ? rec.pdfPath : rec.isdocPath;
+  const capturedBinary = capturedBinaryByInvoice.get(row.invoiceNo);
 
   if (existingServerPath) return;
   const serverCheck = await checkServerArtifact(row, mode);
@@ -417,6 +447,20 @@ async function uploadDownloadedArtifact(row, mode) {
     return;
   }
   if (!sourceUrl) {
+    if (mode === "isdoc" && capturedBinary?.dataUrl) {
+      const blob = dataUrlToBlob(capturedBinary.dataUrl);
+      const uploadResponse = await uploadBlob({
+        blob,
+        filename: capturedBinary.filename || `${row.invoiceNo}.isdoc`,
+        invoiceNo: row.invoiceNo,
+        orderNo: row.orderNo,
+        type,
+        sourceUrl: sourceUrl || ""
+      });
+      await updateDone(row.invoiceNo, { isdocServerPath: uploadResponse?.path || null, lastError: null });
+      capturedBinaryByInvoice.delete(row.invoiceNo);
+      return;
+    }
     throw new Error(`Upload ${mode.toUpperCase()} nelze spustit: Chrome download historie nevrátila zdrojové URL.`);
   }
 
@@ -538,6 +582,12 @@ async function startNextIfIdle() {
       if (nextTask.mode === "isdoc" && execAck.isdocDownloadUrl) {
         await updateDone(row.invoiceNo, { isdocDownloadUrl: execAck.isdocDownloadUrl });
       }
+      if (nextTask.mode === "isdoc" && execAck.isdocDataUrl) {
+        capturedBinaryByInvoice.set(row.invoiceNo, {
+          dataUrl: execAck.isdocDataUrl,
+          filename: execAck.isdocFilename || `${row.invoiceNo}.isdoc`
+        });
+      }
 
       const pollResult = await pollForCompletion(active, DOWNLOAD_TIMEOUT_MS);
       const st2 = await getState();
@@ -599,6 +649,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       const st = await getState();
       await setState({ tabId, windowId, rows: msg.rows || st.rows || [] });
+      await hydrateServerState(msg.rows || st.rows || []);
       await pushStateToUI();
       return sendResponse({ ok: true });
     }
@@ -705,7 +756,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         ok: !!msg.ok,
         error: msg.error || null,
         pdfDownloadUrl: msg.pdfDownloadUrl || null,
-        isdocDownloadUrl: msg.isdocDownloadUrl || null
+        isdocDownloadUrl: msg.isdocDownloadUrl || null,
+        isdocDataUrl: msg.isdocDataUrl || null,
+        isdocFilename: msg.isdocFilename || null
       });
       return sendResponse({ ok: true });
     }

@@ -1,4 +1,13 @@
 (() => {
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
   function matchesDownloadUrl(url, mode) {
     if (typeof url !== "string" || !url) return false;
     const lower = url.toLowerCase();
@@ -29,6 +38,25 @@
     window.dispatchEvent(new CustomEvent("ALZA_PAGE_DOWNLOAD_URL_RESULT", { detail }));
   }
 
+  function inferFilename(response, mode) {
+    const disposition = response.headers.get("content-disposition") || "";
+    const match = disposition.match(/filename\\*?=(?:UTF-8''|\"?)([^\";]+)/i);
+    if (match?.[1]) {
+      try {
+        return decodeURIComponent(match[1].replace(/\"/g, ""));
+      } catch {
+        return match[1].replace(/\"/g, "");
+      }
+    }
+    return mode === "isdoc" ? "download.isdoc" : "download.pdf";
+  }
+
+  function looksLikeIsdocResponse(response) {
+    const contentType = (response.headers.get("content-type") || "").toLowerCase();
+    const disposition = (response.headers.get("content-disposition") || "").toLowerCase();
+    return disposition.includes(".isdoc") || disposition.includes(".isdocx") || contentType.includes("xml") || contentType.includes("octet-stream");
+  }
+
   window.addEventListener("ALZA_PAGE_CAPTURE_DOWNLOAD_URL", (event) => {
     const { requestId, mode, timeoutMs } = event.detail || {};
     const originalFetch = window.fetch;
@@ -38,7 +66,7 @@
     const originalXhrSend = XMLHttpRequest.prototype.send;
     let settled = false;
 
-    const finish = (url) => {
+    const finish = (payload) => {
       if (settled) return;
       settled = true;
       window.fetch = originalFetch;
@@ -46,27 +74,37 @@
       HTMLAnchorElement.prototype.click = originalAnchorClick;
       XMLHttpRequest.prototype.open = originalXhrOpen;
       XMLHttpRequest.prototype.send = originalXhrSend;
-      emit({ requestId, url: url || null });
+      emit({ requestId, ...(payload || {}) });
     };
 
     window.fetch = async (...args) => {
       const response = await originalFetch(...args);
       try {
         const clone = response.clone();
-        const text = await clone.text();
-        finish(matchesDownloadUrl(response.url, mode) ? response.url : findDownloadUrlInValue(text, mode));
+        if (mode === "isdoc" && looksLikeIsdocResponse(response)) {
+          const blob = await clone.blob();
+          const dataUrl = blob.size > 0 ? await blobToDataUrl(blob) : null;
+          finish({
+            url: matchesDownloadUrl(response.url, mode) ? response.url : null,
+            dataUrl,
+            filename: inferFilename(response, mode)
+          });
+        } else {
+          const text = await clone.text();
+          finish({ url: matchesDownloadUrl(response.url, mode) ? response.url : findDownloadUrlInValue(text, mode) });
+        }
       } catch {}
       return response;
     };
 
     window.open = function(url, ...rest) {
-      if (matchesDownloadUrl(url, mode)) finish(url);
+      if (matchesDownloadUrl(url, mode)) finish({ url });
       return originalOpen.call(this, url, ...rest);
     };
 
     HTMLAnchorElement.prototype.click = function(...args) {
       try {
-        if (matchesDownloadUrl(this.href, mode)) finish(this.href);
+        if (matchesDownloadUrl(this.href, mode)) finish({ url: this.href });
       } catch {}
       return originalAnchorClick.apply(this, args);
     };
@@ -78,12 +116,12 @@
     XMLHttpRequest.prototype.send = function(...args) {
       this.addEventListener("load", function() {
         try {
-          finish(findDownloadUrlInValue(this.responseText, mode));
+          finish({ url: findDownloadUrlInValue(this.responseText, mode) });
         } catch {}
       }, { once: true });
       return originalXhrSend.apply(this, args);
     };
 
-    setTimeout(() => finish(null), timeoutMs || 4000);
+    setTimeout(() => finish({ url: null }), timeoutMs || 4000);
   });
 })();
