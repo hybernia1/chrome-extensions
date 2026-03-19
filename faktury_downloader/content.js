@@ -947,7 +947,7 @@ window.addEventListener("ALZA_PAGE_DOWNLOAD_URL_RESULT", (event) => {
   const onDocumentsPage = isDocumentsPage();
   const loginSuccess = new URLSearchParams(location.search).get("loginSuccess") === "1";
 
-  if (accountCycleConfig && loginSuccess && !onDocumentsPage) {
+  if (loginSuccess && !onDocumentsPage) {
     location.href = buildDocumentsUrlForCycle(accountCycleConfig);
     return;
   }
