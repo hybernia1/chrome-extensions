@@ -820,6 +820,34 @@ async function handleAccountCycleTick() {
   }
 }
 
+async function triggerAccountSwitchAfterQueueEmpty() {
+  const config = await getAccountCycleConfig();
+  if (!config || !isDocumentsPage() || accountCycleBusy) return;
+
+  accountCycleBusy = true;
+  try {
+    const cycleState = await getCycleState(config);
+    if (cycleState.phase !== "processing") return;
+
+    const currentEmail = await getTargetAccountEmail(config);
+    const next = await advanceCycleIndex(config);
+    const nextEmail = config.accounts[next.index];
+
+    if (next.waitUntil && next.waitUntil > Date.now()) {
+      setStatusText(`Účet ${currentEmail}: vše staženo. Další kolo začne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
+      return;
+    }
+
+    setStatusText(`Účet ${currentEmail}: vše staženo. Otevírám přepnutí na další účet ${nextEmail}…`);
+    await navigateToAccountSwitcher(config);
+  } catch (err) {
+    ensureSidebar();
+    setStatusText(`Přechod na další účet selhal: ${err?.message || "neznámá chyba"}`);
+  } finally {
+    accountCycleBusy = false;
+  }
+}
+
 async function scheduleAccountCycleIfRequested() {
   const config = await getAccountCycleConfig();
   if (accountCycleTimer || !config) return;
@@ -836,10 +864,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     ensureSidebar();
     setStatusText(msg.text);
     if (typeof msg.text === "string" && msg.text.startsWith("Queue prázdná")) {
-      handleAccountCycleTick().catch((err) => {
-        ensureSidebar();
-        setStatusText(`Přechod na další účet selhal: ${err?.message || "neznámá chyba"}`);
-      });
+      triggerAccountSwitchAfterQueueEmpty().catch(() => {});
     }
   }
   if (msg?.type === "ALZA_STATE") {
