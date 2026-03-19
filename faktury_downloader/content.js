@@ -8,10 +8,14 @@ let autoRefreshTimer = null;
 let accountCycleTimer = null;
 let accountCycleBusy = false;
 let queueEmptyRedirectStarted = false;
+let sidebarCycleTimer = null;
+let sidebarCycleRefreshBusy = false;
 
 const ACCOUNT_CYCLE_STATE_KEY = "alzaAccountCycleStateV1";
 const ACCOUNT_CYCLE_CONFIG_KEY = "alzaAccountCycleConfigV1";
 const ALZA_DOCUMENTS_ORIGIN = "https://www.alza.cz";
+const DEFAULT_ACCOUNT_PAUSE_MS = 10 * 1000;
+const DEFAULT_ROUND_PAUSE_MS = 60 * 1000;
 
 function normalizeAccountRecord(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -86,8 +90,8 @@ async function getSwitcherDiscoveredCycleConfig() {
   if (!accounts.length) return null;
   const config = {
     accounts,
-    accountPauseMs: 10 * 1000,
-    roundPauseMs: 30 * 60 * 1000
+    accountPauseMs: DEFAULT_ACCOUNT_PAUSE_MS,
+    roundPauseMs: DEFAULT_ROUND_PAUSE_MS
   };
   await persistAccountCycleConfig(config);
   return config;
@@ -112,8 +116,8 @@ async function getStoredAccountCycleConfig() {
     if (!accounts.length) return null;
     const roundPauseMs = Number.isFinite(config.roundPauseMs) && config.roundPauseMs > 0
       ? config.roundPauseMs
-      : (Number.isFinite(config.pauseMs) && config.pauseMs > 0 ? config.pauseMs : 30 * 60 * 1000);
-    const accountPauseMs = Number.isFinite(config.accountPauseMs) && config.accountPauseMs > 0 ? config.accountPauseMs : 10 * 1000;
+      : (Number.isFinite(config.pauseMs) && config.pauseMs > 0 ? config.pauseMs : DEFAULT_ROUND_PAUSE_MS);
+    const accountPauseMs = Number.isFinite(config.accountPauseMs) && config.accountPauseMs > 0 ? config.accountPauseMs : DEFAULT_ACCOUNT_PAUSE_MS;
     return { accounts, accountPauseMs, roundPauseMs };
   } catch {
     return null;
@@ -186,10 +190,10 @@ async function getAccountCycleConfig() {
   const storedConfig = await getStoredAccountCycleConfig();
 
   if (paramAccounts.length) {
-    const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || "30", 10);
-    const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : 30;
-    const rawAccountPause = Number.parseInt(params.get("alzaAccountPauseSeconds") || "10", 10);
-    const accountPauseSeconds = Number.isFinite(rawAccountPause) && rawAccountPause > 0 ? rawAccountPause : 10;
+    const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || String(DEFAULT_ROUND_PAUSE_MS / 60000), 10);
+    const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : (DEFAULT_ROUND_PAUSE_MS / 60000);
+    const rawAccountPause = Number.parseInt(params.get("alzaAccountPauseSeconds") || String(DEFAULT_ACCOUNT_PAUSE_MS / 1000), 10);
+    const accountPauseSeconds = Number.isFinite(rawAccountPause) && rawAccountPause > 0 ? rawAccountPause : (DEFAULT_ACCOUNT_PAUSE_MS / 1000);
     const accounts = mergeAccountRecords(storedConfig?.accounts || [], paramAccounts);
     const config = {
       accounts,
@@ -641,9 +645,69 @@ async function formatCycleStatus(config, targetEmail) {
   const position = `${state.index + 1}/${config.accounts.length}`;
   const waitMs = Math.max((state.waitUntil || 0) - Date.now(), 0);
   if (waitMs > 0) {
-    return `Účet ${position}: ${targetEmail} • další kolo proběhne za ${Math.ceil(waitMs / 1000)} s…`;
+    return `Účet ${position}: ${targetEmail} • další krok za ${Math.ceil(waitMs / 1000)} s…`;
   }
   return `Účet ${position}: ${targetEmail}`;
+}
+
+function formatDurationMs(ms) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function getCyclePhaseLabel(phase) {
+  switch (phase) {
+    case "ensure-account": return "Připravuji přepnutí účtu";
+    case "opening-switcher": return "Otevírám account switcher";
+    case "await-documents": return "Čekám na doklady";
+    case "processing": return "Zpracovávám frontu";
+    default: return phase || "Neznámý stav";
+  }
+}
+
+async function updateSidebarCycleInfo() {
+  const panel = document.getElementById("alzaSbCycle");
+  const summaryEl = document.getElementById("alzaSbCycleSummary");
+  const metaEl = document.getElementById("alzaSbCycleMeta");
+  if (!panel || !summaryEl || !metaEl || sidebarCycleRefreshBusy) return;
+
+  sidebarCycleRefreshBusy = true;
+  try {
+    const config = await getAccountCycleConfig();
+    if (!config?.accounts?.length) {
+      panel.hidden = true;
+      return;
+    }
+
+    const state = await getCycleState(config);
+    const currentAccount = config.accounts[state.index] || config.accounts[0];
+    const nextAccount = config.accounts[(state.index + 1) % config.accounts.length] || currentAccount;
+    const currentLabel = getAccountEmail(currentAccount) || getAccountLabel(currentAccount);
+    const nextLabel = getAccountEmail(nextAccount) || getAccountLabel(nextAccount);
+    const remainingMs = Math.max((state.waitUntil || 0) - Date.now(), 0);
+    const waitLabel = remainingMs > 0
+      ? `${state.roundComplete ? "Další kolo" : "Další přepnutí"} za ${formatDurationMs(remainingMs)}`
+      : "Bez čekání";
+
+    panel.hidden = false;
+    summaryEl.textContent = `Účet ${state.index + 1}/${config.accounts.length}: ${currentLabel}`;
+    metaEl.innerHTML = `
+      <span><strong>Fáze:</strong> ${getCyclePhaseLabel(state.phase)}</span>
+      <span><strong>Countdown:</strong> ${waitLabel}</span>
+      <span><strong>Další účet:</strong> ${nextLabel}</span>
+      <span><strong>Pauza mezi rundami:</strong> ${formatDurationMs(config.roundPauseMs)}</span>
+    `;
+  } catch {
+    panel.hidden = true;
+  } finally {
+    sidebarCycleRefreshBusy = false;
+  }
 }
 
 function extractRowsFromTable() {
@@ -839,6 +903,10 @@ function ensureSidebar() {
         <button id="alzaSbResetCycle">Reset cycle</button>
       </div>
       <div id="alzaSbStatus" class="alzaSbStatus">-</div>
+      <div id="alzaSbCycle" class="alzaSbCycle" hidden>
+        <div id="alzaSbCycleSummary" class="alzaSbCycleSummary">-</div>
+        <div id="alzaSbCycleMeta" class="alzaSbCycleMeta"></div>
+      </div>
     </div>
     <div class="alzaSbBody">
       <div id="alzaSbList" class="alzaSbList"></div>
@@ -865,7 +933,13 @@ function ensureSidebar() {
       border-radius:8px;
     }
     .alzaSbStatus{ opacity:.9; white-space:pre-wrap; }
-    .alzaSbBody{ height:calc(100vh - 132px); overflow:auto; padding:10px; }
+    .alzaSbCycle{
+      margin-top:10px; padding:10px 12px; border-radius:12px;
+      background:rgba(88,166,255,.12); border:1px solid rgba(88,166,255,.35);
+    }
+    .alzaSbCycleSummary{ font-size:13px; font-weight:700; margin-bottom:6px; }
+    .alzaSbCycleMeta{ display:grid; gap:4px; color:#dbe9ff; }
+    .alzaSbBody{ height:calc(100vh - 220px); overflow:auto; padding:10px; }
     .alzaSbList{ display:flex; flex-direction:column; gap:8px; }
     .alzaSbRow{
       padding:10px; border:1px solid rgba(255,255,255,.12); border-radius:12px;
@@ -912,11 +986,19 @@ function ensureSidebar() {
   document.getElementById("alzaSbResetCycle").addEventListener("click", async () => {
     await resetAccountCycleNow();
   });
+
+  updateSidebarCycleInfo().catch(() => {});
+  if (!sidebarCycleTimer) {
+    sidebarCycleTimer = setInterval(() => {
+      updateSidebarCycleInfo().catch(() => {});
+    }, 1000);
+  }
 }
 
 function setStatusText(t) {
   const el = document.getElementById("alzaSbStatus");
   if (el) el.textContent = t || "-";
+  updateSidebarCycleInfo().catch(() => {});
 }
 
 function rowPills(rec) {
