@@ -145,12 +145,16 @@ async function getStoredCycleState(config) {
     const completedAccounts = Array.isArray(state.completedAccounts)
       ? state.completedAccounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
       : [];
+    const checkedAccounts = Array.isArray(state.checkedAccounts)
+      ? state.checkedAccounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+      : [];
     return {
       index: ((index % config.accounts.length) + config.accounts.length) % config.accounts.length,
       phase: typeof state.phase === "string" ? state.phase : "ensure-account",
       waitUntil: Number.isFinite(state.waitUntil) ? state.waitUntil : 0,
       lastQueueIdleAt: Number.isFinite(state.lastQueueIdleAt) ? state.lastQueueIdleAt : 0,
       completedAccounts,
+      checkedAccounts,
       roundComplete: !!state.roundComplete
     };
   } catch {
@@ -277,6 +281,7 @@ async function getCycleState(config) {
     waitUntil: 0,
     lastQueueIdleAt: 0,
     completedAccounts: [],
+    checkedAccounts: [],
     roundComplete: false
   };
 
@@ -327,6 +332,7 @@ async function advanceCycleIndex(config) {
     waitUntil: Date.now() + (wrapped ? config.roundPauseMs : config.accountPauseMs),
     lastQueueIdleAt: 0,
     completedAccounts: wrapped ? [] : current.completedAccounts || [],
+    checkedAccounts: wrapped ? [] : current.checkedAccounts || [],
     roundComplete: wrapped
   });
 }
@@ -338,6 +344,10 @@ async function completeCurrentAccountAndAdvance(config, currentAccount) {
     ...(current.completedAccounts || []),
     normalizedCurrent
   ].filter(Boolean)));
+  const checkedAccounts = Array.from(new Set([
+    ...(current.checkedAccounts || []),
+    normalizedCurrent
+  ].filter(Boolean)));
   const nextIndex = config.accounts.findIndex((account) => !completedAccounts.includes(getAccountKey(account)));
 
   if (nextIndex >= 0) {
@@ -347,6 +357,7 @@ async function completeCurrentAccountAndAdvance(config, currentAccount) {
       waitUntil: Date.now() + config.accountPauseMs,
       lastQueueIdleAt: 0,
       completedAccounts,
+      checkedAccounts,
       roundComplete: false
     });
   }
@@ -357,6 +368,7 @@ async function completeCurrentAccountAndAdvance(config, currentAccount) {
     waitUntil: Date.now() + config.roundPauseMs,
     lastQueueIdleAt: 0,
     completedAccounts,
+    checkedAccounts: [],
     roundComplete: true
   });
 }
@@ -538,13 +550,17 @@ async function syncCycleConfigWithSwitcherAccounts(config) {
 async function getNextStoredTargetAccount(config) {
   const cycleState = await getCycleState(config);
   const completed = new Set(cycleState.completedAccounts || []);
+  const checked = new Set(cycleState.checkedAccounts || []);
   const orderedAccounts = normalizeAccountRecordList(config.accounts);
   const currentByIndex = orderedAccounts[cycleState.index];
   const nextAccount = (
-    currentByIndex && !completed.has(getAccountKey(currentByIndex))
+    currentByIndex && !completed.has(getAccountKey(currentByIndex)) && !checked.has(getAccountKey(currentByIndex))
       ? currentByIndex
       : null
-  ) || orderedAccounts.find((account) => !completed.has(getAccountKey(account))) || orderedAccounts[0];
+  ) || orderedAccounts.find((account) => {
+    const key = getAccountKey(account);
+    return !completed.has(key) && !checked.has(key);
+  }) || orderedAccounts.find((account) => !completed.has(getAccountKey(account))) || orderedAccounts[0];
   if (!nextAccount) return null;
 
   const nextIndex = config.accounts.findIndex((account) => getAccountKey(account) === getAccountKey(nextAccount));
@@ -630,6 +646,10 @@ async function selectTargetAccount(config = null) {
           phase: "await-documents",
           waitUntil: Date.now() + 10000,
           lastQueueIdleAt: 0,
+          checkedAccounts: Array.from(new Set([
+            ...((await getCycleState(config)).checkedAccounts || []),
+            getAccountKey(targetAccount)
+          ])),
           roundComplete: false
         });
       }
@@ -1083,6 +1103,7 @@ async function handleAccountCycleTick() {
         waitUntil: 0,
         lastQueueIdleAt: 0,
         completedAccounts: [],
+        checkedAccounts: [],
         roundComplete: false
       });
     }
@@ -1215,6 +1236,7 @@ async function resetAccountCycleNow() {
     waitUntil: 0,
     lastQueueIdleAt: 0,
     completedAccounts: [],
+    checkedAccounts: [],
     roundComplete: false
   });
 
