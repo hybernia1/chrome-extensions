@@ -626,7 +626,12 @@ async function selectTargetAccount(config = null) {
     const targetNode = targetAccount ? findAccountSwitchClickable(targetAccount) : null;
     if (targetNode) {
       if (config) {
-        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+        await setCycleState(config, {
+          phase: "await-documents",
+          waitUntil: Date.now() + 10000,
+          lastQueueIdleAt: 0,
+          roundComplete: false
+        });
       }
       triggerRealClick(targetNode);
       return true;
