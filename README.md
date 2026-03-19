@@ -15,6 +15,21 @@ Expected behavior:
 - the endpoint intentionally accepts uploads without token-based authentication
 - if uploads should fall back to reading the already-downloaded local file, enable Chrome extension access to `file://` URLs for this extension
 
+## Python launcher pro automatický běh
+
+Pro jednodušší použití je v repu i `scripts/run_alza_sync.py`, který:
+- otevře defaultní browser na `https://www.alza.cz/my-account/documents.htm?alzaAutoStart=1`
+- nechá extension automaticky spustit frontu dokladů
+- průběžně spouští lokální uploader nad `invoice/` a `isdoc/`
+- úspěšné soubory přesouvá do archivu (`processed/` nebo `--archive-dir`)
+
+Příklady:
+- `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury`
+- `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury --archive-dir /cesta/k/processed`
+- `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury --idle-timeout 300`
+
+`alzaAutoStart=1` je určené pro nasazení s defaultním browserem, kde je už uživatel přihlášený do Alzy a má aktivní extension.
+
 ## Python uploader pro lokální soubory
 
 Repo nově obsahuje i dávkový uploader `scripts/upload_local_files.py`, který umí projít lokální složky `invoice/` a `isdoc/`, ověřit přes API, zda už soubor na serveru existuje, a chybějící soubory nahrát.

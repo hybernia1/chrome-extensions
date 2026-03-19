@@ -2,6 +2,17 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const digits = (s) => (s || "").replace(/[^\d]/g, "");
 const pageResolvers = new Map();
 let pageRequestSeq = 0;
+let autoStartTriggered = false;
+let autoStartAttempted = false;
+
+function getAutoStartMode() {
+  const params = new URLSearchParams(location.search);
+  const enabled = params.get("alzaAutoStart");
+  if (!enabled || enabled === "0" || enabled.toLowerCase() === "false") return null;
+
+  const mode = (params.get("alzaAutoMode") || "both").toLowerCase();
+  return mode === "isdoc" ? "isdoc" : "both";
+}
 
 function extractRowsFromTable() {
   const table = document.querySelector("table");
@@ -361,7 +372,35 @@ async function attachRows() {
   await chrome.runtime.sendMessage({ type: "ALZA_ATTACH", rows });
 
   const resp = await chrome.runtime.sendMessage({ type: "ALZA_GET_STATE" });
-  if (resp?.ok) renderList(resp.state);
+  if (resp?.ok) {
+    renderList(resp.state);
+    return { rows, state: resp.state };
+  }
+  return { rows, state: null };
+}
+
+async function autoStartIfRequested() {
+  if (autoStartTriggered || autoStartAttempted) return;
+
+  const mode = getAutoStartMode();
+  if (!mode) return;
+
+  autoStartAttempted = true;
+  ensureSidebar();
+  setStatusText("Autostart: čekám na načtení dokladů…");
+
+  for (let attempt = 0; attempt < 90; attempt++) {
+    const { rows } = await attachRows();
+    if (rows.length > 0) {
+      autoStartTriggered = true;
+      setStatusText(`Autostart: spouštím ${mode === "isdoc" ? "ISDOC" : "PDF + ISDOC"} frontu…`);
+      await chrome.runtime.sendMessage({ type: mode === "isdoc" ? "ALZA_START_ISDOC" : "ALZA_START_ALL" });
+      return;
+    }
+    await sleep(1000);
+  }
+
+  setStatusText("Autostart: nepodařilo se načíst tabulku dokladů včas.");
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -414,4 +453,8 @@ window.addEventListener("ALZA_PAGE_DOWNLOAD_URL_RESULT", (event) => {
   if (!location.href.includes("documents")) return;
   injectPageBridge();
   attachRows().catch(() => {});
+  autoStartIfRequested().catch((err) => {
+    ensureSidebar();
+    setStatusText(`Autostart selhal: ${err?.message || "neznámá chyba"}`);
+  });
 })();
