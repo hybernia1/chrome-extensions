@@ -424,6 +424,25 @@ function findAccountSwitchClickable(account) {
   return null;
 }
 
+function submitAccountSwitcherForm(account) {
+  const normalized = normalizeAccountRecord(account);
+  if (!normalized.sessionId) return false;
+
+  const form = document.querySelector(".switch-account form, form.login-wrapper");
+  const selectedSessionInput = document.querySelector("#SelectedSessionId[name='SelectedSessionId']");
+  if (!(form instanceof HTMLFormElement) || !(selectedSessionInput instanceof HTMLInputElement)) {
+    return false;
+  }
+
+  selectedSessionInput.value = normalized.sessionId;
+  if (typeof form.requestSubmit === "function") {
+    form.requestSubmit();
+  } else {
+    form.submit();
+  }
+  return true;
+}
+
 function getNextNonActiveAccountBox() {
   const boxes = getAccountSwitcherBoxes()
     .filter((box) => box.matches?.(".account-box[data-sessionid], .account-box.active"));
@@ -542,6 +561,9 @@ async function selectTargetAccount(config = null) {
     if (targetNode) {
       if (config) {
         await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+      }
+      if (targetAccount && submitAccountSwitcherForm(targetAccount)) {
+        return true;
       }
       (targetNode.closest("a") || targetNode).click();
       return true;
