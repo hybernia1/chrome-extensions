@@ -86,7 +86,8 @@ async function getSwitcherDiscoveredCycleConfig() {
   if (!accounts.length) return null;
   const config = {
     accounts,
-    pauseMs: 30 * 60 * 1000
+    accountPauseMs: 10 * 1000,
+    roundPauseMs: 30 * 60 * 1000
   };
   await persistAccountCycleConfig(config);
   return config;
@@ -109,8 +110,11 @@ async function getStoredAccountCycleConfig() {
     if (!config || !Array.isArray(config.accounts) || !config.accounts.length) return null;
     const accounts = normalizeAccountRecordList(config.accounts);
     if (!accounts.length) return null;
-    const pauseMs = Number.isFinite(config.pauseMs) && config.pauseMs > 0 ? config.pauseMs : 30 * 60 * 1000;
-    return { accounts, pauseMs };
+    const roundPauseMs = Number.isFinite(config.roundPauseMs) && config.roundPauseMs > 0
+      ? config.roundPauseMs
+      : (Number.isFinite(config.pauseMs) && config.pauseMs > 0 ? config.pauseMs : 30 * 60 * 1000);
+    const accountPauseMs = Number.isFinite(config.accountPauseMs) && config.accountPauseMs > 0 ? config.accountPauseMs : 10 * 1000;
+    return { accounts, accountPauseMs, roundPauseMs };
   } catch {
     return null;
   }
@@ -125,7 +129,8 @@ async function persistAccountCycleConfig(config) {
     await chrome.storage.local.set({
       [ACCOUNT_CYCLE_CONFIG_KEY]: {
         accounts: normalizeAccountRecordList(config.accounts),
-        pauseMs: config.pauseMs
+        accountPauseMs: config.accountPauseMs,
+        roundPauseMs: config.roundPauseMs
       }
     });
   } catch {}
@@ -178,14 +183,18 @@ async function getAccountCycleConfig() {
   if (paramAccounts.length) {
     const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || "30", 10);
     const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : 30;
+    const rawAccountPause = Number.parseInt(params.get("alzaAccountPauseSeconds") || "10", 10);
+    const accountPauseSeconds = Number.isFinite(rawAccountPause) && rawAccountPause > 0 ? rawAccountPause : 10;
     const accounts = mergeAccountRecords(storedConfig?.accounts || [], paramAccounts);
     const config = {
       accounts,
-      pauseMs: pauseMinutes * 60 * 1000
+      accountPauseMs: accountPauseSeconds * 1000,
+      roundPauseMs: pauseMinutes * 60 * 1000
     };
     if (
       !storedConfig ||
-      storedConfig.pauseMs !== config.pauseMs ||
+      storedConfig.accountPauseMs !== config.accountPauseMs ||
+      storedConfig.roundPauseMs !== config.roundPauseMs ||
       storedConfig.accounts.length !== config.accounts.length ||
       storedConfig.accounts.some((account, index) => getAccountKey(account) !== getAccountKey(config.accounts[index]))
     ) {
@@ -224,7 +233,8 @@ function buildDocumentsUrlForCycle(config = null) {
   url.searchParams.set("alzaAutoMode", "both");
   if (config?.accounts?.length) {
     url.searchParams.set("alzaAccounts", config.accounts.map((account) => getAccountEmail(account)).filter(Boolean).join(","));
-    url.searchParams.set("alzaCyclePauseMinutes", String(Math.max(Math.round(config.pauseMs / 60000), 1)));
+    url.searchParams.set("alzaCyclePauseMinutes", String(Math.max(Math.round(config.roundPauseMs / 60000), 1)));
+    url.searchParams.set("alzaAccountPauseSeconds", String(Math.max(Math.round(config.accountPauseMs / 1000), 1)));
   }
   return url.toString();
 }
@@ -312,7 +322,7 @@ async function advanceCycleIndex(config) {
   return await setCycleState(config, {
     index: nextIndex,
     phase: "ensure-account",
-    waitUntil: Date.now() + (wrapped ? config.pauseMs : 0),
+    waitUntil: Date.now() + (wrapped ? config.roundPauseMs : config.accountPauseMs),
     lastQueueIdleAt: 0,
     completedAccounts: wrapped ? [] : current.completedAccounts || []
   });
@@ -331,7 +341,7 @@ async function completeCurrentAccountAndAdvance(config, currentAccount) {
     return await setCycleState(config, {
       index: nextIndex,
       phase: "ensure-account",
-      waitUntil: Date.now() + config.pauseMs,
+      waitUntil: Date.now() + config.accountPauseMs,
       lastQueueIdleAt: 0,
       completedAccounts
     });
@@ -340,7 +350,7 @@ async function completeCurrentAccountAndAdvance(config, currentAccount) {
   return await setCycleState(config, {
     index: 0,
     phase: "ensure-account",
-    waitUntil: Date.now() + config.pauseMs,
+    waitUntil: Date.now() + config.roundPauseMs,
     lastQueueIdleAt: 0,
     completedAccounts: []
   });
