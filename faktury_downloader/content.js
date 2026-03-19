@@ -25,34 +25,6 @@ function findDocumentRowByInvoice(invoiceNo) {
   return findDocumentRows().find((tr) => (tr.innerText || '').includes(invoiceNo)) || null;
 }
 
-function dispatchMouseSequence(node) {
-  if (!node) return false;
-  const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-  for (const type of events) {
-    node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-  }
-  return true;
-}
-
-function getDocumentRowClickCandidates(tr) {
-  const firstCell = tr.querySelector('td');
-  return [
-    firstCell?.querySelector('[role="button"]'),
-    firstCell?.querySelector('button'),
-    firstCell?.querySelector('a'),
-    firstCell?.querySelector('span'),
-    firstCell,
-    tr
-  ].filter(Boolean);
-}
-
-function clickInvoiceInDocumentRow(tr) {
-  for (const candidate of getDocumentRowClickCandidates(tr)) {
-    if (dispatchMouseSequence(candidate)) return;
-  }
-  throw new Error('Klikací element faktury nenalezen.');
-}
-
 function extractRowsFromDocumentsTable() {
   return findDocumentRows().map((tr) => {
     const tds = tr.querySelectorAll('td');
@@ -346,19 +318,6 @@ function getReactFiber(node) {
         }
       }
 
-      async function runResolveOptions(detail) {
-        const { requestId, invoiceNo } = detail || {};
-        const row = findDocumentRowByInvoice(invoiceNo);
-        if (!row) {
-          emit({ requestId, ok: false, error: 'Řádek dokumentu nebyl nalezen.' });
-          return;
-        }
-
-        withOptionsCapture(requestId, () => {
-          clickInvoiceInDocumentRow(row);
-        }, 7000, 'Options endpoint se neodchytil po otevření modalu.');
-      }
-
       async function runIsdoc(detail) {
         const { requestId, invoiceNo } = detail || {};
         const context = getAttachmentContext(invoiceNo);
@@ -426,10 +385,6 @@ function getReactFiber(node) {
         withOptionsCapture(requestId, () => {}, 15000, 'Manuální otevření modalu nevyvolalo options endpoint.');
       }
 
-      window.addEventListener('ALZA_PAGE_RESOLVE_OPTIONS', (event) => {
-        runResolveOptions(event.detail);
-      });
-
       window.addEventListener('ALZA_PAGE_ARM_OPTIONS_CAPTURE', (event) => {
         armManualOptionsCapture(event.detail);
       });
@@ -438,27 +393,6 @@ function getReactFiber(node) {
 
   (document.documentElement || document.head || document.body).appendChild(script);
   script.remove();
-}
-
-function resolveOptionsViaPage(invoiceNo) {
-  return new Promise((resolve, reject) => {
-    const requestId = `options-${Date.now()}-${++pageRequestSeq}`;
-    const timer = setTimeout(() => {
-      pageResolvers.delete(requestId);
-      reject(new Error('Page options bridge timeout.'));
-    }, 7000);
-
-    pageResolvers.set(requestId, (result) => {
-      clearTimeout(timer);
-      pageResolvers.delete(requestId);
-      if (result?.ok) resolve(result);
-      else reject(new Error(result?.error || 'Page bridge nevrátil options data.'));
-    });
-
-    window.dispatchEvent(new CustomEvent('ALZA_PAGE_RESOLVE_OPTIONS', {
-      detail: { requestId, invoiceNo }
-    }));
-  });
 }
 
 function armManualOptionsCapture(invoiceNo) {
@@ -641,7 +575,7 @@ function renderList(state) {
       PDF URL: ${row.pdfUrl ? 'ANO' : 'NE'}<br>
       ISDOC options: ${row.isdocOptionsUrl ? 'ANO' : 'NE'}<br>
       documentId: ${row.documentId || '-'}<br>
-      Manual capture: ${armedManualInvoice === row.invoiceNo ? 'ČEKÁ NA KLIK' : '-'}
+      Manual modal: ${armedManualInvoice === row.invoiceNo ? 'ČEKÁ NA KLIK' : 'PŘIPRAVEN'}
     `;
 
     return `
@@ -657,7 +591,7 @@ function renderList(state) {
           <button data-act="retryPdf" data-inv="${row.invoiceNo}">Retry PDF</button>
           <button data-act="retryIsdoc" data-inv="${row.invoiceNo}">Retry ISDOC</button>
           <button data-act="retryBoth" data-inv="${row.invoiceNo}">Retry obojí</button>
-          <button data-act="manualOptions" data-inv="${row.invoiceNo}">Manual modal</button>
+          <button data-act="manualOptions" data-inv="${row.invoiceNo}">Arm manual modal</button>
           <button data-act="scroll" data-inv="${row.invoiceNo}">Scroll</button>
         </div>
         <div class="alzaSbRowMeta">${serverPaths}</div>
@@ -676,7 +610,7 @@ function renderList(state) {
       if (act === 'retryIsdoc') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'isdoc' });
       if (act === 'retryBoth') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'both' });
       if (act === 'manualOptions') {
-        setStatusText(`Manual capture armed for ${inv}. Klikněte ručně na fakturu v tabulce Alza.`);
+        setStatusText(`Manual modal armed for ${inv}. Klikněte ručně na fakturu v tabulce Alza.`);
         const rowEl = findRowElementByInvoice(inv);
         if (rowEl) rowEl.scrollIntoView({ block: 'center', inline: 'nearest' });
         armManualOptionsCapture(inv)
@@ -730,12 +664,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'ALZA_STATE') {
     ensureSidebar();
     renderList(msg.state);
-  }
-  if (msg?.type === 'ALZA_RESOLVE_ROW_OPTIONS') {
-    resolveOptionsViaPage(msg.invoiceNo)
-      .then((result) => sendResponse({ ok: true, ...result }))
-      .catch((error) => sendResponse({ ok: false, error: error?.message || 'Options page bridge failed' }));
-    return true;
   }
   if (msg?.type === 'ALZA_RESOLVE_ISDOC_ATTACHMENT') {
     resolveIsdocAttachmentViaPage(msg.invoiceNo)

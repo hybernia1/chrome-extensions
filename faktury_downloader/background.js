@@ -123,37 +123,7 @@ async function requestIsdocAttachmentFromPage(invoiceNo) {
 }
 
 async function enrichRowFromPage(row) {
-  if (row?.pdfUrl || row?.isdocOptionsUrl) return row;
-
-  const st = await getState();
-  if (!st.tabId) return row;
-
-  const response = await chrome.tabs.sendMessage(st.tabId, {
-    type: "ALZA_RESOLVE_ROW_OPTIONS",
-    invoiceNo: row.invoiceNo
-  });
-
-  if (!response?.ok) {
-    throw new Error(response?.error || `Nepodařilo se vyřešit options pro ${row.invoiceNo}.`);
-  }
-
-  const nextRow = {
-    ...row,
-    pdfUrl: response.pdfUrl || row.pdfUrl || null,
-    isdocOptionsUrl: response.isdocOptionsUrl || row.isdocOptionsUrl || null,
-    documentId: response.documentId || row.documentId || null
-  };
-
-  const nextRows = st.rows.map((item) => item.invoiceNo === row.invoiceNo ? nextRow : item);
-  await setState({ rows: nextRows });
-  await updateDone(row.invoiceNo, {
-    orderNo: row.orderNo,
-    pdfUrl: nextRow.pdfUrl,
-    isdocOptionsUrl: nextRow.isdocOptionsUrl,
-    documentId: nextRow.documentId
-  });
-  await pushStateToUI();
-  return nextRow;
+  return row;
 }
 
 async function storeResolvedRowOptions(invoiceNo, result) {
@@ -179,6 +149,21 @@ async function storeResolvedRowOptions(invoiceNo, result) {
   });
   await pushStateToUI();
   return nextRow;
+}
+
+function isRowReadyForMode(row, mode) {
+  if (mode === "pdf") return !!row?.pdfUrl;
+  if (mode === "isdoc") return !!row?.isdocOptionsUrl;
+  return !!row?.pdfUrl && !!row?.isdocOptionsUrl;
+}
+
+function buildManualModalMessage(row, mode) {
+  const target = mode === "pdf"
+    ? "PDF URL"
+    : mode === "isdoc"
+      ? "ISDOC options"
+      : "PDF/ISDOC metadata";
+  return `Chybí ${target} pro ${row.invoiceNo}. V sidebaru použijte 'Arm manual modal' a pak klikněte ručně na fakturu v Alza tabulce.`;
 }
 
 function isTaskDoneForMode(rec, mode) {
@@ -526,6 +511,14 @@ async function startNextIfIdle() {
         await updateDone(row.invoiceNo, { lastError: error?.message || "Options enrichment failed" });
         return row;
       });
+
+      if (!isRowReadyForMode(row, nextTask.mode)) {
+        const message = buildManualModalMessage(row, nextTask.mode);
+        await updateDone(row.invoiceNo, { lastError: message });
+        await setStatus(message);
+        await pushStateToUI();
+        continue;
+      }
 
       const rec = normalizeDoneRecord((await getState()).done[row.invoiceNo]);
       if (isTaskDoneForMode(rec, nextTask.mode)) continue;
