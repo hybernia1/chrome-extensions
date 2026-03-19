@@ -880,7 +880,11 @@ chrome.runtime.onMessage.addListener((msg) => {
     ensureSidebar();
     setStatusText(msg.text);
     if (typeof msg.text === "string" && msg.text.startsWith("Queue prázdná")) {
-      triggerAccountSwitchAfterQueueEmpty().catch(() => {});
+      setStatusText("Queue prázdná. Zkouším otevřít přepnutí účtu…");
+      triggerAccountSwitchAfterQueueEmpty().catch((err) => {
+        ensureSidebar();
+        setStatusText(`Přechod na další účet selhal: ${err?.message || "neznámá chyba"}`);
+      });
     }
   }
   if (msg?.type === "ALZA_STATE") {
