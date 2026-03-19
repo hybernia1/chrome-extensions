@@ -73,6 +73,14 @@ function mergeAccountRecords(existingAccounts = [], discoveredAccounts = []) {
   return merged;
 }
 
+function sortAccountRecords(accounts = []) {
+  return [...normalizeAccountRecordList(accounts)].sort((a, b) => {
+    const keyA = getAccountKey(a);
+    const keyB = getAccountKey(b);
+    return keyA.localeCompare(keyB);
+  });
+}
+
 function getAutoStartMode() {
   const params = new URLSearchParams(location.search);
   const enabled = params.get("alzaAutoStart");
@@ -470,54 +478,34 @@ async function syncCycleConfigWithSwitcherAccounts(config) {
   if (!discoveredAccounts.length) return config;
 
   const currentAccounts = normalizeAccountRecordList(Array.isArray(config.accounts) ? config.accounts : []);
-  const mergedAccounts = mergeAccountRecords(currentAccounts, discoveredAccounts);
+  const authoritativeAccounts = sortAccountRecords(discoveredAccounts);
   const changed = (
-    mergedAccounts.length !== currentAccounts.length ||
-    mergedAccounts.some((account, index) => getAccountKey(account) !== getAccountKey(currentAccounts[index]))
+    authoritativeAccounts.length !== currentAccounts.length ||
+    authoritativeAccounts.some((account, index) => getAccountKey(account) !== getAccountKey(currentAccounts[index]))
   );
-  if (!changed) return config;
-
-  const activeAccount = normalizeAccountRecord({
-    sessionId: getAccountBoxSessionId(getActiveAccountBox()),
-    email: getAccountBoxEmail(getActiveAccountBox()),
-    name: getAccountBoxName(getActiveAccountBox())
-  });
   const nextConfig = {
     ...config,
-    accounts: mergedAccounts
+    accounts: authoritativeAccounts
   };
 
-  await persistAccountCycleConfig(nextConfig);
-
-  const currentState = await getCycleState(nextConfig);
-  const currentTargetKey = getAccountKey(currentAccounts[currentState.index]);
-  const nextIndex = currentTargetKey
-    ? mergedAccounts.findIndex((account) => getAccountKey(account) === currentTargetKey)
-    : -1;
-  const activeKey = getAccountKey(activeAccount);
-  const fallbackIndex = activeKey ? mergedAccounts.findIndex((account) => getAccountKey(account) === activeKey) : -1;
-  await setCycleState(nextConfig, {
-    index: nextIndex >= 0 ? nextIndex : Math.max(fallbackIndex, 0)
-  });
-
+  if (changed) {
+    await persistAccountCycleConfig(nextConfig);
+  }
   return nextConfig;
 }
 
-async function getNextTargetAccountFromSwitcher(config) {
-  const discoveredAccounts = getAccountRecordsFromSwitcher();
-  if (!discoveredAccounts.length) return null;
-
+async function getNextStoredTargetAccount(config) {
   const cycleState = await getCycleState(config);
   const completed = new Set(cycleState.completedAccounts || []);
   const activeKey = getAccountKey({
     sessionId: getAccountBoxSessionId(getActiveAccountBox()),
     email: getAccountBoxEmail(getActiveAccountBox())
   });
-  const activeIndex = discoveredAccounts.findIndex((account) => getAccountKey(account) === activeKey);
-  const orderedAccounts = activeIndex >= 0
-    ? [...discoveredAccounts.slice(activeIndex + 1), ...discoveredAccounts.slice(0, activeIndex + 1)]
-    : discoveredAccounts;
-  const nextAccount = orderedAccounts.find((account) => !completed.has(getAccountKey(account))) || orderedAccounts[0];
+  const orderedAccounts = normalizeAccountRecordList(config.accounts);
+  const nextAccount = orderedAccounts.find((account) => {
+    const key = getAccountKey(account);
+    return key !== activeKey && !completed.has(key);
+  }) || orderedAccounts.find((account) => !completed.has(getAccountKey(account))) || orderedAccounts[0];
   if (!nextAccount) return null;
 
   const nextIndex = config.accounts.findIndex((account) => getAccountKey(account) === getAccountKey(nextAccount));
@@ -558,26 +546,8 @@ async function selectTargetAccount(config = null) {
     config = await syncCycleConfigWithSwitcherAccounts(config);
   }
   const start = Date.now();
-  let targetAccount = config ? (await getNextTargetAccountFromSwitcher(config)) || (await getTargetAccount(config)) : null;
+  let targetAccount = config ? await getNextStoredTargetAccount(config) : null;
   while (Date.now() - start < 15000) {
-    if (targetAccount && isTargetAccountAlreadyActive(targetAccount) && config?.accounts?.length > 1) {
-      const activeKey = getAccountKey({
-        sessionId: getAccountBoxSessionId(getActiveAccountBox()),
-        email: getAccountBoxEmail(getActiveAccountBox())
-      });
-      const activeIndex = config.accounts.findIndex((account) => getAccountKey(account) === activeKey);
-      if (activeIndex >= 0) {
-        const nextIndex = (activeIndex + 1) % config.accounts.length;
-        targetAccount = normalizeAccountRecord(config.accounts[nextIndex]);
-        await setCycleState(config, {
-          index: nextIndex,
-          phase: "opening-switcher",
-          waitUntil: 0,
-          lastQueueIdleAt: 0
-        });
-      }
-    }
-
     if (targetAccount && isTargetAccountAlreadyActive(targetAccount)) {
       if (config) {
         await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
@@ -585,18 +555,14 @@ async function selectTargetAccount(config = null) {
       return true;
     }
 
-    const targetNode = targetAccount
-      ? findAccountSwitchClickable(targetAccount)
-      : getNextNonActiveAccountBox();
-    if (targetNode) {
+    if (targetAccount?.sessionId) {
       if (config) {
         await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
       }
-      if (targetAccount && submitAccountSwitcherForm(targetAccount)) {
+      if (submitAccountSwitcherForm(targetAccount)) {
         return true;
       }
-      (targetNode.closest("a") || targetNode).click();
-      return true;
+      throw new Error(`Nepodařilo se odeslat switcher formulář pro účet ${getAccountLabel(targetAccount)}.`);
     }
 
     await sleep(250);
