@@ -248,6 +248,17 @@ function getAccountSwitcherBoxes() {
   return Array.from(document.querySelectorAll(".account-box[data-sessionid], a .account-box, .account-box.active"));
 }
 
+function getAccountEmailsFromSwitcher() {
+  const seen = new Set();
+  return getAccountSwitcherBoxes()
+    .map((box) => getAccountBoxEmail(box))
+    .filter((email) => {
+      if (!email || seen.has(email)) return false;
+      seen.add(email);
+      return true;
+    });
+}
+
 function getAccountBoxEmail(box) {
   if (!box) return "";
   return (
@@ -305,6 +316,39 @@ function isTargetAccountAlreadyActive(email) {
   return getAccountBoxEmail(getActiveAccountBox()) === normalized;
 }
 
+async function syncCycleConfigWithSwitcherAccounts(config) {
+  if (!config) return config;
+
+  const discoveredAccounts = getAccountEmailsFromSwitcher();
+  if (!discoveredAccounts.length) return config;
+
+  const currentAccounts = Array.isArray(config.accounts) ? config.accounts : [];
+  const changed = (
+    discoveredAccounts.length !== currentAccounts.length ||
+    discoveredAccounts.some((email, index) => email !== currentAccounts[index])
+  );
+  if (!changed) return config;
+
+  const activeEmail = getAccountBoxEmail(getActiveAccountBox());
+  const nextConfig = {
+    ...config,
+    accounts: discoveredAccounts
+  };
+
+  await persistAccountCycleConfig(nextConfig);
+
+  const currentState = await getCycleState(nextConfig);
+  const nextIndex = currentAccounts[currentState.index]
+    ? discoveredAccounts.indexOf(currentAccounts[currentState.index])
+    : -1;
+  const fallbackIndex = activeEmail ? discoveredAccounts.indexOf(activeEmail) : -1;
+  await setCycleState(nextConfig, {
+    index: nextIndex >= 0 ? nextIndex : Math.max(fallbackIndex, 0)
+  });
+
+  return nextConfig;
+}
+
 async function navigateToAccountSwitcher(config = null) {
   if (config) {
     await setCycleState(config, { phase: "opening-switcher" });
@@ -326,6 +370,9 @@ async function navigateToAccountSwitcher(config = null) {
 }
 
 async function selectTargetAccount(config = null) {
+  if (config) {
+    config = await syncCycleConfigWithSwitcherAccounts(config);
+  }
   const start = Date.now();
   const targetEmail = config ? await getTargetAccountEmail(config) : "";
   while (Date.now() - start < 15000) {
