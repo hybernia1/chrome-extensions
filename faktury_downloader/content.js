@@ -134,9 +134,8 @@ function buildDocumentsUrlForCycle(config = null) {
 }
 
 function buildAccountSwitcherUrl() {
-  const url = new URL("/external/login", ALZA_DOCUMENTS_ORIGIN);
-  url.searchParams.set("inherit", "false");
-  url.searchParams.set("prompt", "select_account");
+  const url = new URL("https://identity.alza.cz/account/select");
+  url.searchParams.set("returnUrl", "/");
   return url.toString();
 }
 
@@ -908,6 +907,12 @@ window.addEventListener("ALZA_PAGE_DOWNLOAD_URL_RESULT", (event) => {
 (async function init() {
   const accountCycleConfig = await getAccountCycleConfig();
   const onDocumentsPage = isDocumentsPage();
+  const loginSuccess = new URLSearchParams(location.search).get("loginSuccess") === "1";
+
+  if (accountCycleConfig && loginSuccess && !onDocumentsPage) {
+    location.href = buildDocumentsUrlForCycle(accountCycleConfig);
+    return;
+  }
 
   if (!onDocumentsPage && !accountCycleConfig) return;
 
