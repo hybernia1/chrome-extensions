@@ -587,10 +587,14 @@ async function selectTargetAccount(config = null) {
       const completed = new Set(cycleState.completedAccounts || []);
       const targetKey = getAccountKey(targetAccount);
       const orderedAccounts = normalizeAccountRecordList(config.accounts);
-      const nextAccount = orderedAccounts.find((account) => {
+      const currentIndex = orderedAccounts.findIndex((account) => getAccountKey(account) === targetKey);
+      const rotatedAccounts = currentIndex >= 0
+        ? [...orderedAccounts.slice(currentIndex + 1), ...orderedAccounts.slice(0, currentIndex)]
+        : orderedAccounts;
+      const nextAccount = rotatedAccounts.find((account) => {
         const key = getAccountKey(account);
         return key !== targetKey && !completed.has(key);
-      }) || orderedAccounts.find((account) => getAccountKey(account) !== targetKey) || targetAccount;
+      }) || rotatedAccounts.find((account) => getAccountKey(account) !== targetKey) || targetAccount;
 
       if (getAccountKey(nextAccount) !== targetKey) {
         const nextIndex = orderedAccounts.findIndex((account) => getAccountKey(account) === getAccountKey(nextAccount));
