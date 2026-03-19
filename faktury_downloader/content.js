@@ -491,15 +491,13 @@ async function syncCycleConfigWithSwitcherAccounts(config) {
 async function getNextStoredTargetAccount(config) {
   const cycleState = await getCycleState(config);
   const completed = new Set(cycleState.completedAccounts || []);
-  const activeKey = getAccountKey({
-    sessionId: getAccountBoxSessionId(getActiveAccountBox()),
-    email: getAccountBoxEmail(getActiveAccountBox())
-  });
   const orderedAccounts = normalizeAccountRecordList(config.accounts);
-  const nextAccount = orderedAccounts.find((account) => {
-    const key = getAccountKey(account);
-    return key !== activeKey && !completed.has(key);
-  }) || orderedAccounts.find((account) => !completed.has(getAccountKey(account))) || orderedAccounts[0];
+  const currentByIndex = orderedAccounts[cycleState.index];
+  const nextAccount = (
+    currentByIndex && !completed.has(getAccountKey(currentByIndex))
+      ? currentByIndex
+      : null
+  ) || orderedAccounts.find((account) => !completed.has(getAccountKey(account))) || orderedAccounts[0];
   if (!nextAccount) return null;
 
   const nextIndex = config.accounts.findIndex((account) => getAccountKey(account) === getAccountKey(nextAccount));
