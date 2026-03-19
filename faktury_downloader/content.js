@@ -265,47 +265,39 @@ function findAccountSwitchClickableByEmail(email) {
 
 async function navigateToAccountSwitcher(config) {
   await setCycleState(config, { phase: "opening-switcher" });
+  if (await ensureHeaderMenuOpen()) {
+    const link = findSelectAccountLink();
+    if (link) {
+      link.click();
+      return true;
+    }
+  }
+
   location.href = buildAccountSwitcherUrl();
   return true;
 }
 
 async function selectTargetAccount(config) {
-  const targetEmail = await getTargetAccountEmail(config);
   const start = Date.now();
   while (Date.now() - start < 15000) {
+    const boxes = getAccountSwitcherBoxes()
+      .filter((box) => box.matches?.(".account-box[data-sessionid], .account-box.active"));
     const activeBox = getActiveAccountBox();
-    const activeEmail = getAccountBoxEmail(activeBox);
-    const candidate = findAccountSwitchClickableByEmail(targetEmail);
+    const activeIndex = boxes.findIndex((box) => box === activeBox);
+    const nextBox =
+      (activeIndex >= 0 ? boxes.slice(activeIndex + 1).find((box) => !box.classList.contains("active")) : null) ||
+      boxes.find((box) => !box.classList.contains("active"));
 
-    if (candidate) {
-      const candidateEmail = getAccountBoxEmail(candidate.matches?.(".account-box") ? candidate : candidate.querySelector?.(".account-box") || candidate.closest?.(".account-box"));
-      if (activeEmail && candidateEmail && activeEmail === candidateEmail) {
-        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
-        location.href = buildDocumentsUrlForCycle(config);
-        return true;
-      }
-
+    if (nextBox) {
       await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
-      candidate.click();
+      (nextBox.closest("a") || nextBox).click();
       return true;
-    }
-
-    if (activeEmail) {
-      const fallbackEmail = config.accounts.find((email) => email !== activeEmail);
-      if (fallbackEmail) {
-        const fallbackCandidate = findAccountSwitchClickableByEmail(fallbackEmail);
-        if (fallbackCandidate) {
-          await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
-          fallbackCandidate.click();
-          return true;
-        }
-      }
     }
 
     await sleep(250);
   }
 
-  throw new Error(`Účet ${targetEmail} se ve switcheru nepodařilo najít.`);
+  throw new Error("Nepodařilo se najít další účet ve switcheru.");
 }
 
 async function formatCycleStatus(config, targetEmail) {
