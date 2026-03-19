@@ -186,15 +186,36 @@ def archive_path_for(candidate: CandidateFile, archive_dir: Path) -> Path:
     return archive_dir / root_name / candidate.order_no / candidate.path.name
 
 
+def remove_empty_parent_dirs(candidate: CandidateFile) -> None:
+    stop_dir = candidate.path.parents[1]
+    current = candidate.path.parent
+
+    while current != stop_dir:
+        if current.exists():
+            try:
+                current.rmdir()
+            except OSError:
+                break
+        current = current.parent
+
+    if current.exists():
+        try:
+            current.rmdir()
+        except OSError:
+            pass
+
+
 def finalize_uploaded_file(candidate: CandidateFile, args: argparse.Namespace) -> None:
     if args.delete_after_upload:
         candidate.path.unlink(missing_ok=True)
+        remove_empty_parent_dirs(candidate)
         return
 
     if args.archive_dir:
         target = archive_path_for(candidate, args.archive_dir)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(candidate.path), str(target))
+        remove_empty_parent_dirs(candidate)
 
 
 def process_candidate(candidate: CandidateFile, args: argparse.Namespace) -> tuple[str, str]:

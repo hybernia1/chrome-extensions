@@ -20,15 +20,16 @@ Expected behavior:
 Pro jednodušší použití je v repu i `scripts/run_alza_sync.py`, který:
 - otevře defaultní browser na `https://www.alza.cz/my-account/documents.htm?alzaAutoStart=1`
 - nechá extension automaticky spustit frontu dokladů
+- v autostart režimu pravidelně obnovuje stránku (default každých 10 minut), aby se načetly nové doklady
 - průběžně spouští lokální uploader nad `invoice/` a `isdoc/`
-- úspěšné soubory přesouvá do archivu (`processed/` nebo `--archive-dir`)
+- úspěšné soubory přesouvá do archivu (`processed/` nebo `--archive-dir`) a uklízí prázdné order složky
 
 Příklady:
 - `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury`
 - `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury --archive-dir /cesta/k/processed`
 - `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury --idle-timeout 300`
 
-`alzaAutoStart=1` je určené pro nasazení s defaultním browserem, kde je už uživatel přihlášený do Alzy a má aktivní extension.
+`alzaAutoStart=1` je určené pro nasazení s defaultním browserem, kde je už uživatel přihlášený do Alzy a má aktivní extension. Refresh interval lze změnit přes query parametr `alzaRefreshMinutes`, např. `...?alzaAutoStart=1&alzaRefreshMinutes=5`.
 
 ## Python uploader pro lokální soubory
 

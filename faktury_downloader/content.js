@@ -4,6 +4,7 @@ const pageResolvers = new Map();
 let pageRequestSeq = 0;
 let autoStartTriggered = false;
 let autoStartAttempted = false;
+let autoRefreshTimer = null;
 
 function getAutoStartMode() {
   const params = new URLSearchParams(location.search);
@@ -12,6 +13,13 @@ function getAutoStartMode() {
 
   const mode = (params.get("alzaAutoMode") || "both").toLowerCase();
   return mode === "isdoc" ? "isdoc" : "both";
+}
+
+function getAutoRefreshIntervalMs() {
+  const params = new URLSearchParams(location.search);
+  const raw = Number.parseInt(params.get("alzaRefreshMinutes") || "10", 10);
+  const minutes = Number.isFinite(raw) && raw > 0 ? raw : 10;
+  return minutes * 60 * 1000;
 }
 
 function extractRowsFromTable() {
@@ -403,6 +411,26 @@ async function autoStartIfRequested() {
   setStatusText("Autostart: nepodařilo se načíst tabulku dokladů včas.");
 }
 
+function scheduleAutoRefreshIfRequested() {
+  if (autoRefreshTimer || !getAutoStartMode()) return;
+
+  const intervalMs = getAutoRefreshIntervalMs();
+  autoRefreshTimer = setInterval(async () => {
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: "ALZA_GET_STATE" });
+      if (resp?.ok && resp.state?.running) {
+        setStatusText("Autostart: fronta stále běží, obnovení seznamu odkládám.");
+        return;
+      }
+
+      setStatusText("Autostart: obnovuji stránku kvůli novým dokladům…");
+      location.reload();
+    } catch (err) {
+      setStatusText(`Autostart refresh selhal: ${err?.message || "neznámá chyba"}`);
+    }
+  }, intervalMs);
+}
+
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === "ALZA_STATUS") {
     ensureSidebar();
@@ -453,6 +481,7 @@ window.addEventListener("ALZA_PAGE_DOWNLOAD_URL_RESULT", (event) => {
   if (!location.href.includes("documents")) return;
   injectPageBridge();
   attachRows().catch(() => {});
+  scheduleAutoRefreshIfRequested();
   autoStartIfRequested().catch((err) => {
     ensureSidebar();
     setStatusText(`Autostart selhal: ${err?.message || "neznámá chyba"}`);
