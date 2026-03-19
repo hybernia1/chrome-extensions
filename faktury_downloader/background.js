@@ -594,7 +594,7 @@ async function startNextIfIdle() {
 
       if (!nextTask) {
         await setState({ running: false });
-        await setStatus("Queue prázdná.");
+        await setStatus("Queue prázdná, vše staženo/uploadováno.");
         await pushStateToUI();
         return;
       }

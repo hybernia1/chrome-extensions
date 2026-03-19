@@ -789,12 +789,15 @@ async function handleAccountCycleTick() {
       const idleAt = current.lastQueueIdleAt || Date.now();
       if (!current.lastQueueIdleAt) {
         await setCycleState(config, { lastQueueIdleAt: idleAt });
-        setStatusText(`${await formatCycleStatus(config, targetEmail)} • čekám na dokončení uploadů…`);
+        const nextIndex = (current.index + 1) % config.accounts.length;
+        const nextEmail = config.accounts[nextIndex];
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • vše staženo, jdu zkusit další účet ${nextEmail}…`);
         return;
       }
 
       if (Date.now() - idleAt < 15000) {
-        setStatusText(`${await formatCycleStatus(config, targetEmail)} • dokončuji poslední operace…`);
+        const remaining = Math.max(1, Math.ceil((15000 - (Date.now() - idleAt)) / 1000));
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • vše staženo, za ${remaining} s zkusím další účet…`);
         return;
       }
 
