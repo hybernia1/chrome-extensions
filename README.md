@@ -10,5 +10,4 @@ Expected behavior:
 - saves PDFs under `invoice/<orderNo>/<invoiceNo>.pdf`
 - saves ISDOC files under `isdoc/<orderNo>/<invoiceNo>.(isdoc|isdocx)`
 - returns JSON with `ok`, `stored`, `exists`, and `path`
-- optional auth can be enabled via `ALZA_UPLOAD_TOKEN` environment variable and `X-Upload-Token` header
-- if token auth is enabled on the server, set the same value in `faktury_downloader/background.js` (`UPLOAD_TOKEN`) or uploads will fail with HTTP 401
+- the endpoint intentionally accepts uploads without token-based authentication

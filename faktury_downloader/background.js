@@ -3,7 +3,6 @@ const MAX_RETRIES_PER_ITEM = 3;
 const EXEC_ACK_TIMEOUT_MS = 30000;
 const DOWNLOAD_TIMEOUT_MS = 180000;
 const UPLOAD_ENDPOINT = "http://10.3.109.33/faktury/alza/upload.php";
-const UPLOAD_TOKEN = "";
 
 let expectedCache = null;
 let runnerActive = false;
@@ -344,7 +343,6 @@ async function uploadBlob({ blob, filename, invoiceNo, orderNo, type, sourceUrl 
 
   const response = await fetch(UPLOAD_ENDPOINT, {
     method: "POST",
-    headers: UPLOAD_TOKEN ? { "X-Upload-Token": UPLOAD_TOKEN } : undefined,
     body: formData
   });
 
@@ -465,19 +463,6 @@ async function startNextIfIdle() {
         continue;
       }
 
-      const recFromDisk = await syncDoneWithDisk(row);
-      if (isTaskDoneForMode(recFromDisk, nextTask.mode)) {
-        await setStatus(`Přeskakuji (už staženo): ${row.invoiceNo} (${nextTask.mode})`);
-        await pushStateToUI();
-        try {
-          await uploadDownloadedArtifact(row, nextTask.mode);
-        } catch (error) {
-          await updateDone(row.invoiceNo, { lastError: error?.message || "Upload selhal." });
-          await pushStateToUI();
-        }
-        continue;
-      }
-
       if (nextTask.mode === "both") {
         const expanded = expandTaskByMode(nextTask.invoiceNo, "both", nextTask.attempts || 0);
         await setState({ queue: [...expanded, ...queue] });
@@ -549,13 +534,8 @@ async function buildQueueFromRows(rows, mode) {
   const queue = [];
 
   for (const row of rows) {
-    const rec = await syncDoneWithDisk(row);
     const tasks = expandTaskByMode(row.invoiceNo, mode, 0);
-    for (const task of tasks) {
-      if (!isTaskDoneForMode(rec, task.mode)) {
-        queue.push(task);
-      }
-    }
+    queue.push(...tasks);
   }
 
   return queue;
@@ -618,7 +598,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const rowsToKeep = stBefore.rows || [];
 
       await clearAllState();
-      const done = await resyncDoneForRows(rowsToKeep);
       const tabId = sender?.tab?.id;
       const windowId = sender?.tab?.windowId;
       if (tabId) {
@@ -627,14 +606,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             tabId,
             windowId,
             rows: rowsToKeep,
-            done,
+            done: {},
             running: false,
             active: null,
             queue: []
           }
         });
       }
-      await sendToTab(tabId, { type: "ALZA_STATUS", text: "Fronta smazána, stav synchronizován z disku." });
+      await sendToTab(tabId, { type: "ALZA_STATUS", text: "Fronta smazána." });
       await sendToTab(tabId, { type: "ALZA_STATE", state: await getState() });
       return sendResponse({ ok: true });
     }

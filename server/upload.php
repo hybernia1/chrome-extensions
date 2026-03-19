@@ -5,7 +5,7 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, X-Upload-Token');
+header('Access-Control-Allow-Headers: Content-Type');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(204);
@@ -61,15 +61,6 @@ function allowed_extension(string $type, string $originalName, string $mimeType)
     }
 
     return 'isdoc';
-}
-
-$expectedToken = getenv('ALZA_UPLOAD_TOKEN') ?: '';
-$providedToken = $_SERVER['HTTP_X_UPLOAD_TOKEN'] ?? '';
-if ($expectedToken !== '' && !hash_equals($expectedToken, $providedToken)) {
-    respond(401, [
-        'ok' => false,
-        'error' => 'Neplatný upload token.',
-    ]);
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
