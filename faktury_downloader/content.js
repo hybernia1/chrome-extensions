@@ -1,5 +1,193 @@
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const digits = (s) => (s || "").replace(/[^\d]/g, "");
+const pageResolvers = new Map();
+let pageRequestSeq = 0;
+let autoStartTriggered = false;
+let autoStartAttempted = false;
+let autoRefreshTimer = null;
+let accountCycleTimer = null;
+let accountCycleBusy = false;
+
+const ACCOUNT_CYCLE_STATE_KEY = "alzaAccountCycleStateV1";
+
+function getAutoStartMode() {
+  const params = new URLSearchParams(location.search);
+  const enabled = params.get("alzaAutoStart");
+  if (!enabled || enabled === "0" || enabled.toLowerCase() === "false") return null;
+
+  const mode = (params.get("alzaAutoMode") || "both").toLowerCase();
+  return mode === "isdoc" ? "isdoc" : "both";
+}
+
+function getAutoRefreshIntervalMs() {
+  const params = new URLSearchParams(location.search);
+  const raw = Number.parseInt(params.get("alzaRefreshMinutes") || "10", 10);
+  const minutes = Number.isFinite(raw) && raw > 0 ? raw : 10;
+  return minutes * 60 * 1000;
+}
+
+function getAccountCycleConfig() {
+  const params = new URLSearchParams(location.search);
+  const accounts = (params.get("alzaAccounts") || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (!accounts.length) return null;
+
+  const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || "10", 10);
+  const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : 10;
+
+  return {
+    accounts,
+    pauseMs: pauseMinutes * 60 * 1000
+  };
+}
+
+function isDocumentsPage() {
+  return location.pathname.includes("/my-account/documents.htm");
+}
+
+function isAccountSwitcherPage() {
+  const href = location.href.toLowerCase();
+  return href.includes("prompt=select_account") || href.includes("/external/login");
+}
+
+function buildDocumentsUrlForCycle() {
+  const url = new URL(location.href);
+  url.pathname = "/my-account/documents.htm";
+  url.searchParams.set("alzaAutoStart", "1");
+  if (!url.searchParams.get("alzaAutoMode")) url.searchParams.set("alzaAutoMode", "both");
+  return url.toString();
+}
+
+function getCycleState(config) {
+  const defaults = {
+    index: 0,
+    phase: "ensure-account",
+    waitUntil: 0,
+    lastQueueIdleAt: 0
+  };
+
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(ACCOUNT_CYCLE_STATE_KEY) || "null");
+    if (!stored || typeof stored !== "object") return defaults;
+    const index = Number.isInteger(stored.index) ? stored.index : 0;
+    return {
+      ...defaults,
+      ...stored,
+      index: ((index % config.accounts.length) + config.accounts.length) % config.accounts.length
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+function setCycleState(config, patch) {
+  const next = { ...getCycleState(config), ...patch };
+  sessionStorage.setItem(ACCOUNT_CYCLE_STATE_KEY, JSON.stringify(next));
+  return next;
+}
+
+function getTargetAccountEmail(config) {
+  const state = getCycleState(config);
+  return config.accounts[state.index] || config.accounts[0];
+}
+
+function advanceCycleIndex(config) {
+  const current = getCycleState(config);
+  const nextIndex = (current.index + 1) % config.accounts.length;
+  const wrapped = nextIndex === 0;
+  return setCycleState(config, {
+    index: nextIndex,
+    phase: "ensure-account",
+    waitUntil: Date.now() + (wrapped ? config.pauseMs : 0),
+    lastQueueIdleAt: 0
+  });
+}
+
+function findHeaderContextMenuToggle() {
+  return document.querySelector("[data-testid='headerContextMenuToggleTitle']");
+}
+
+function findSelectAccountLink() {
+  return document.querySelector("[data-testid='headerNavigationSelectAccount']");
+}
+
+async function ensureHeaderMenuOpen() {
+  const existing = findSelectAccountLink();
+  if (existing) return true;
+
+  const toggle = findHeaderContextMenuToggle();
+  if (!toggle) return false;
+
+  toggle.click();
+  const start = Date.now();
+  while (Date.now() - start < 8000) {
+    if (findSelectAccountLink()) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
+function findAccountSwitchClickableByEmail(email) {
+  const normalized = (email || "").trim().toLowerCase();
+  if (!normalized) return null;
+
+  const containers = Array.from(document.querySelectorAll("main, [role='dialog'], body"));
+  for (const container of containers) {
+    const nodes = Array.from(container.querySelectorAll("a, button, [role='button'], div, span"));
+    const exact = nodes.find((node) => (node.textContent || "").trim().toLowerCase() === normalized);
+    const partial = nodes.find((node) => (node.textContent || "").trim().toLowerCase().includes(normalized));
+    const candidate = exact || partial;
+    if (candidate) return candidate.closest("a, button, [role='button']") || candidate;
+  }
+
+  return null;
+}
+
+async function navigateToAccountSwitcher(config) {
+  setCycleState(config, { phase: "opening-switcher" });
+  if (await ensureHeaderMenuOpen()) {
+    const link = findSelectAccountLink();
+    if (link) {
+      link.click();
+      return true;
+    }
+  }
+
+  const fallback = new URL("/external/login", location.origin);
+  fallback.searchParams.set("inherit", "false");
+  fallback.searchParams.set("prompt", "select_account");
+  location.href = fallback.toString();
+  return true;
+}
+
+async function selectTargetAccount(config) {
+  const targetEmail = getTargetAccountEmail(config);
+  const start = Date.now();
+  while (Date.now() - start < 15000) {
+    const candidate = findAccountSwitchClickableByEmail(targetEmail);
+    if (candidate) {
+      setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+      candidate.click();
+      return true;
+    }
+    await sleep(250);
+  }
+
+  throw new Error(`Účet ${targetEmail} se ve switcheru nepodařilo najít.`);
+}
+
+function formatCycleStatus(config, targetEmail) {
+  const state = getCycleState(config);
+  const position = `${state.index + 1}/${config.accounts.length}`;
+  const waitMs = Math.max((state.waitUntil || 0) - Date.now(), 0);
+  if (waitMs > 0) {
+    return `Účet ${position}: ${targetEmail} • čekám ${Math.ceil(waitMs / 1000)} s na další kolo…`;
+  }
+  return `Účet ${position}: ${targetEmail}`;
+}
 
 function extractRowsFromTable() {
   const table = document.querySelector("table");
@@ -77,22 +265,95 @@ async function closeFormatModal(modal) {
   await sleep(250);
 }
 
+function matchesDownloadUrl(url, mode) {
+  if (typeof url !== "string" || !url) return false;
+  const lower = url.toLowerCase();
+  if (mode === "pdf") return lower.includes("pdf.alza.cz") || lower.includes(".pdf");
+  return lower.includes("/attachment/") || lower.includes(".isdoc");
+}
+
+function findDownloadUrlInValue(value, mode) {
+  if (!value) return null;
+  if (typeof value === "string") return matchesDownloadUrl(value, mode) ? value : null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findDownloadUrlInValue(item, mode);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value === "object") {
+    for (const nested of Object.values(value)) {
+      const found = findDownloadUrlInValue(nested, mode);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function injectPageBridge() {
+  if (document.getElementById("alzaPageBridge")) return;
+
+  const script = document.createElement("script");
+  script.id = "alzaPageBridge";
+  script.src = chrome.runtime.getURL("page_bridge.js");
+  script.onload = () => script.remove();
+  (document.documentElement || document.head || document.body).appendChild(script);
+}
+
+async function captureDownloadUrl(mode, trigger, timeoutMs = 4000) {
+  injectPageBridge();
+
+  return await new Promise((resolve) => {
+    const requestId = `download-url-${Date.now()}-${++pageRequestSeq}`;
+    const timer = setTimeout(() => {
+      pageResolvers.delete(requestId);
+      resolve(null);
+    }, timeoutMs + 500);
+
+    pageResolvers.set(requestId, (payload) => {
+      clearTimeout(timer);
+      pageResolvers.delete(requestId);
+      resolve(payload || { url: null });
+    });
+
+    window.dispatchEvent(new CustomEvent("ALZA_PAGE_CAPTURE_DOWNLOAD_URL", {
+      detail: { requestId, mode, timeoutMs }
+    }));
+
+    Promise.resolve()
+      .then(() => trigger())
+      .catch(() => {
+        clearTimeout(timer);
+        pageResolvers.delete(requestId);
+        resolve({ url: null });
+      });
+  });
+}
+
 async function clickDownloads(modal, mode) {
   const pdfBtn = findButtonByExactText(modal, "PDF");
   const isdocBtn = findButtonByExactText(modal, "ISDOC");
   if (!pdfBtn || !isdocBtn) throw new Error("Nenalezeno PDF/ISDOC tlačítko.");
+  const result = { pdfDownloadUrl: null, isdocDownloadUrl: null, isdocDataUrl: null, isdocFilename: null };
 
   if (mode === "pdf" || mode === "both") {
-    pdfBtn.click();
+    const pdfCapture = await captureDownloadUrl("pdf", () => pdfBtn.click());
+    result.pdfDownloadUrl = pdfCapture?.url || null;
     await sleep(250);
     await closeDownloadStartedModal(await waitForDownloadStartedModal(8000));
   }
 
   if (mode === "isdoc" || mode === "both") {
-    isdocBtn.click();
+    const isdocCapture = await captureDownloadUrl("isdoc", () => isdocBtn.click());
+    result.isdocDownloadUrl = isdocCapture?.url || null;
+    result.isdocDataUrl = isdocCapture?.dataUrl || null;
+    result.isdocFilename = isdocCapture?.filename || null;
     await sleep(250);
     await closeDownloadStartedModal(await waitForDownloadStartedModal(8000));
   }
+
+  return result;
 }
 
 function restoreScroll(savedY, tr) {
@@ -100,7 +361,6 @@ function restoreScroll(savedY, tr) {
   try { tr.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
 }
 
-// ---------------- Sidebar UI ----------------
 let sidebarEl = null;
 
 function ensureSidebar() {
@@ -251,7 +511,9 @@ function renderList(state) {
 
         <div class="alzaSbRowErr" style="color:#bcd4ff;">
           ${rec?.pdfPath ? `PDF: ${rec.pdfPath}` : "PDF: -"}<br>
-          ${rec?.isdocPath ? `ISDOC: ${rec.isdocPath}` : "ISDOC: -"}
+          ${rec?.isdocPath ? `ISDOC: ${rec.isdocPath}` : "ISDOC: -"}<br>
+          ${rec?.pdfServerPath ? `PDF server: ${rec.pdfServerPath}` : "PDF server: -"}<br>
+          ${rec?.isdocServerPath ? `ISDOC server: ${rec.isdocServerPath}` : "ISDOC server: -"}
         </div>
 
         ${err}
@@ -270,7 +532,6 @@ function renderList(state) {
       if (act === "retryBoth") await chrome.runtime.sendMessage({ type: "ALZA_RETRY", invoiceNo: inv, mode: "both" });
       if (act === "openPdf") await chrome.runtime.sendMessage({ type: "ALZA_OPEN_DOWNLOADED", invoiceNo: inv, mode: "pdf" });
       if (act === "openIsdoc") await chrome.runtime.sendMessage({ type: "ALZA_OPEN_DOWNLOADED", invoiceNo: inv, mode: "isdoc" });
-
       if (act === "scroll") {
         const tr = findTrByInvoice(inv);
         if (tr) tr.scrollIntoView({ block: "center", inline: "nearest" });
@@ -286,7 +547,151 @@ async function attachRows() {
   await chrome.runtime.sendMessage({ type: "ALZA_ATTACH", rows });
 
   const resp = await chrome.runtime.sendMessage({ type: "ALZA_GET_STATE" });
-  if (resp?.ok) renderList(resp.state);
+  if (resp?.ok) {
+    renderList(resp.state);
+    return { rows, state: resp.state };
+  }
+  return { rows, state: null };
+}
+
+async function autoStartIfRequested() {
+  if (autoStartTriggered || autoStartAttempted) return;
+
+  const mode = getAutoStartMode();
+  if (!mode) return;
+
+  autoStartAttempted = true;
+  ensureSidebar();
+  setStatusText("Autostart: čekám na načtení dokladů…");
+
+  for (let attempt = 0; attempt < 90; attempt++) {
+    const { rows } = await attachRows();
+    if (rows.length > 0) {
+      autoStartTriggered = true;
+      setStatusText(`Autostart: spouštím ${mode === "isdoc" ? "ISDOC" : "PDF + ISDOC"} frontu…`);
+      await chrome.runtime.sendMessage({ type: mode === "isdoc" ? "ALZA_START_ISDOC" : "ALZA_START_ALL" });
+      return;
+    }
+    await sleep(1000);
+  }
+
+  setStatusText("Autostart: nepodařilo se načíst tabulku dokladů včas.");
+}
+
+function scheduleAutoRefreshIfRequested() {
+  if (autoRefreshTimer || !getAutoStartMode() || getAccountCycleConfig()) return;
+
+  const intervalMs = getAutoRefreshIntervalMs();
+  autoRefreshTimer = setInterval(async () => {
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: "ALZA_GET_STATE" });
+      if (resp?.ok && resp.state?.running) {
+        setStatusText("Autostart: fronta stále běží, obnovení seznamu odkládám.");
+        return;
+      }
+
+      setStatusText("Autostart: obnovuji stránku kvůli novým dokladům…");
+      location.reload();
+    } catch (err) {
+      setStatusText(`Autostart refresh selhal: ${err?.message || "neznámá chyba"}`);
+    }
+  }, intervalMs);
+}
+
+async function handleAccountCycleTick() {
+  const config = getAccountCycleConfig();
+  if (!config || accountCycleBusy) return;
+
+  accountCycleBusy = true;
+  try {
+    const targetEmail = getTargetAccountEmail(config);
+    const cycleState = getCycleState(config);
+
+    ensureSidebar();
+    setStatusText(formatCycleStatus(config, targetEmail));
+
+    if (cycleState.waitUntil && Date.now() < cycleState.waitUntil) return;
+
+    if (isAccountSwitcherPage()) {
+      setStatusText(`${formatCycleStatus(config, targetEmail)} • vybírám účet ve switcheru…`);
+      await selectTargetAccount(config);
+      return;
+    }
+
+    if (!isDocumentsPage()) {
+      if (cycleState.phase === "await-documents" || cycleState.phase === "processing") {
+        setStatusText(`${formatCycleStatus(config, targetEmail)} • otevírám stránku dokladů…`);
+        location.href = buildDocumentsUrlForCycle();
+        return;
+      }
+      return;
+    }
+
+    const resp = await chrome.runtime.sendMessage({ type: "ALZA_GET_STATE" });
+    const bgState = resp?.ok ? resp.state : null;
+
+    if (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher") {
+      setStatusText(`${formatCycleStatus(config, targetEmail)} • otevírám account switcher…`);
+      await navigateToAccountSwitcher(config);
+      return;
+    }
+
+    if (cycleState.phase === "await-documents") {
+      setCycleState(config, { phase: "processing", waitUntil: 0, lastQueueIdleAt: 0 });
+      autoStartAttempted = false;
+      autoStartTriggered = false;
+      setStatusText(`${formatCycleStatus(config, targetEmail)} • spouštím autostart…`);
+      await autoStartIfRequested();
+      return;
+    }
+
+    if (cycleState.phase === "processing") {
+      if (bgState?.running) {
+        setCycleState(config, { lastQueueIdleAt: 0 });
+        setStatusText(`${formatCycleStatus(config, targetEmail)} • fronta běží…`);
+        return;
+      }
+
+      const current = getCycleState(config);
+      const idleAt = current.lastQueueIdleAt || Date.now();
+      if (!current.lastQueueIdleAt) {
+        setCycleState(config, { lastQueueIdleAt: idleAt });
+        setStatusText(`${formatCycleStatus(config, targetEmail)} • čekám na dokončení uploadů…`);
+        return;
+      }
+
+      if (Date.now() - idleAt < 15000) {
+        setStatusText(`${formatCycleStatus(config, targetEmail)} • dokončuji poslední operace…`);
+        return;
+      }
+
+      const next = advanceCycleIndex(config);
+      const nextEmail = config.accounts[next.index];
+      if (next.waitUntil && next.waitUntil > Date.now()) {
+        setStatusText(`Účet ${targetEmail}: hotovo. Další kolo začne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
+        return;
+      }
+
+      setStatusText(`Účet ${targetEmail}: hotovo. Přepínám na další účet ${nextEmail}…`);
+      await navigateToAccountSwitcher(config);
+      return;
+    }
+  } catch (err) {
+    ensureSidebar();
+    setStatusText(`Přepínání účtů selhalo: ${err?.message || "neznámá chyba"}`);
+  } finally {
+    accountCycleBusy = false;
+  }
+}
+
+function scheduleAccountCycleIfRequested() {
+  if (accountCycleTimer || !getAccountCycleConfig()) return;
+
+  accountCycleTimer = setInterval(() => {
+    handleAccountCycleTick().catch(() => {});
+  }, 2000);
+
+  handleAccountCycleTick().catch(() => {});
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -312,12 +717,12 @@ chrome.runtime.onMessage.addListener((msg) => {
       clickInvoiceInTr(tr);
       const modal = await waitForFormatModal(15000);
 
-      await clickDownloads(modal, mode);
+      const downloadInfo = await clickDownloads(modal, mode);
       await closeFormatModal(modal);
 
       await sleep(100);
       restoreScroll(savedY, tr);
-      await chrome.runtime.sendMessage({ type: "ALZA_RUN_ROW_RESULT", runId, ok: true });
+      await chrome.runtime.sendMessage({ type: "ALZA_RUN_ROW_RESULT", runId, ok: true, ...downloadInfo });
     })().catch(async (err) => {
       await chrome.runtime.sendMessage({
         type: "ALZA_RUN_ROW_RESULT",
@@ -329,7 +734,31 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
+window.addEventListener("ALZA_PAGE_DOWNLOAD_URL_RESULT", (event) => {
+  const detail = event.detail || {};
+  const resolver = pageResolvers.get(detail.requestId);
+  if (resolver) resolver(detail);
+});
+
 (function init() {
-  if (!location.href.includes("documents")) return;
+  const accountCycleConfig = getAccountCycleConfig();
+  const onDocumentsPage = isDocumentsPage();
+
+  if (!onDocumentsPage && !accountCycleConfig) return;
+
+  if (accountCycleConfig) {
+    ensureSidebar();
+    scheduleAccountCycleIfRequested();
+  }
+
+  if (!onDocumentsPage) return;
+
+  injectPageBridge();
   attachRows().catch(() => {});
+  scheduleAutoRefreshIfRequested();
+  if (accountCycleConfig) return;
+  autoStartIfRequested().catch((err) => {
+    ensureSidebar();
+    setStatusText(`Autostart selhal: ${err?.message || "neznámá chyba"}`);
+  });
 })();
