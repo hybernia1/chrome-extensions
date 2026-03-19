@@ -603,35 +603,6 @@ async function selectTargetAccount(config = null) {
   const start = Date.now();
   let targetAccount = config ? await getNextStoredTargetAccount(config) : null;
   while (Date.now() - start < 15000) {
-    if (targetAccount && isTargetAccountAlreadyActive(targetAccount) && config?.accounts?.length > 1) {
-      const cycleState = await getCycleState(config);
-      const completed = new Set(cycleState.completedAccounts || []);
-      const targetKey = getAccountKey(targetAccount);
-      const orderedAccounts = normalizeAccountRecordList(config.accounts);
-      const currentIndex = orderedAccounts.findIndex((account) => getAccountKey(account) === targetKey);
-      const rotatedAccounts = currentIndex >= 0
-        ? [...orderedAccounts.slice(currentIndex + 1), ...orderedAccounts.slice(0, currentIndex)]
-        : orderedAccounts;
-      const nextAccount = rotatedAccounts.find((account) => {
-        const key = getAccountKey(account);
-        return key !== targetKey && !completed.has(key);
-      }) || rotatedAccounts.find((account) => getAccountKey(account) !== targetKey) || targetAccount;
-
-      if (getAccountKey(nextAccount) !== targetKey) {
-        const nextIndex = orderedAccounts.findIndex((account) => getAccountKey(account) === getAccountKey(nextAccount));
-        if (nextIndex >= 0) {
-          await setCycleState(config, {
-            index: nextIndex,
-            phase: "opening-switcher",
-            waitUntil: 0,
-            lastQueueIdleAt: 0
-          });
-          targetAccount = normalizeAccountRecord(nextAccount);
-          continue;
-        }
-      }
-    }
-
     if (targetAccount && isTargetAccountAlreadyActive(targetAccount)) {
       if (config) {
         await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
