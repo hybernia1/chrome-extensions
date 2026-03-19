@@ -667,7 +667,14 @@ async function handleAccountCycleTick() {
 
       const next = advanceCycleIndex(config);
       const nextEmail = config.accounts[next.index];
-      setStatusText(`Účet ${targetEmail}: hotovo. Další účet ${nextEmail}.`);
+      if (next.waitUntil && next.waitUntil > Date.now()) {
+        setStatusText(`Účet ${targetEmail}: hotovo. Další kolo začne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
+        return;
+      }
+
+      setStatusText(`Účet ${targetEmail}: hotovo. Přepínám na další účet ${nextEmail}…`);
+      await navigateToAccountSwitcher(config);
+      return;
     }
   } catch (err) {
     ensureSidebar();
