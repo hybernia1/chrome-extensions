@@ -640,6 +640,13 @@ async function selectTargetAccount(config = null) {
     : "Nepodařilo se najít další účet ve switcheru.");
 }
 
+async function redirectToDocumentsPageForCycle(config, reasonText = "otevírám stránku dokladů…") {
+  const targetEmail = await getTargetAccountEmail(config);
+  setStatusText(`${await formatCycleStatus(config, targetEmail)} • ${reasonText}`);
+  await sleep(750);
+  location.href = buildDocumentsUrlForCycle(config);
+}
+
 async function formatCycleStatus(config, targetEmail) {
   const state = await getCycleState(config);
   const position = `${state.index + 1}/${config.accounts.length}`;
@@ -1168,8 +1175,17 @@ async function handleAccountCycleTick() {
     if (cycleState.waitUntil && Date.now() < cycleState.waitUntil) return;
 
     if (isAccountSwitcherPage()) {
+      if (cycleState.phase === "await-documents") {
+        await redirectToDocumentsPageForCycle(config, "účet je připravený, otevírám doklady…");
+        return;
+      }
+
       setStatusText(`${await formatCycleStatus(config, targetEmail)} • vybírám účet ve switcheru…`);
       await selectTargetAccount(config);
+      const nextState = await getCycleState(config);
+      if (nextState.phase === "await-documents") {
+        await redirectToDocumentsPageForCycle(config, "účet vybrán, otevírám doklady…");
+      }
       return;
     }
 
