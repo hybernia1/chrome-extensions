@@ -445,6 +445,38 @@ function findAccountSwitchClickable(account) {
   return null;
 }
 
+function triggerRealClick(node) {
+  if (!(node instanceof HTMLElement)) return false;
+  node.scrollIntoView({ block: "center", inline: "nearest" });
+
+  const events = [
+    ["pointerdown", PointerEvent],
+    ["mousedown", MouseEvent],
+    ["pointerup", PointerEvent],
+    ["mouseup", MouseEvent],
+    ["click", MouseEvent]
+  ];
+
+  for (const [type, EventCtor] of events) {
+    try {
+      node.dispatchEvent(new EventCtor(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window
+      }));
+    } catch {
+      node.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+    }
+  }
+
+  return true;
+}
+
 function getNextNonActiveAccountBox() {
   const boxes = getAccountSwitcherBoxes()
     .filter((box) => box.matches?.(".account-box[data-sessionid], .account-box.active"));
@@ -552,7 +584,7 @@ async function selectTargetAccount(config = null) {
       if (config) {
         await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
       }
-      targetNode.click();
+      triggerRealClick(targetNode);
       return true;
     }
 
