@@ -12,7 +12,8 @@
     "https://www.alza.cz/*",
     "https://pdf.alza.cz/*",
     "https://webapi.alza.cz/*",
-    "http://10.3.109.33/*"
+    "http://10.3.109.33/*",
+    "file:///*"
   ],
   "background": {
     "service_worker": "background.js"

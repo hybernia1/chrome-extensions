@@ -452,6 +452,32 @@ function inferFilename(downloadUrl, fallbackName) {
   return fallbackName;
 }
 
+function localPathToFileUrl(localPath) {
+  const normalized = String(localPath || "").replaceAll("\\", "/");
+  if (!normalized) return null;
+  if (/^[a-zA-Z]:\//.test(normalized)) {
+    return `file:///${normalized}`;
+  }
+  if (normalized.startsWith("/")) {
+    return `file://${normalized}`;
+  }
+  return `file:///${normalized}`;
+}
+
+async function fetchLocalBlob(localPath) {
+  const fileUrl = localPathToFileUrl(localPath);
+  if (!fileUrl) throw new Error("Lokální cesta ke staženému souboru není dostupná.");
+
+  const response = await fetch(fileUrl);
+  if (!response.ok) {
+    throw new Error(`Lokální soubor se nepodařilo načíst (${response.status}). Zkontrolujte povolení 'Allow access to file URLs' u rozšíření.`);
+  }
+
+  const blob = await response.blob();
+  if (!blob || blob.size === 0) throw new Error("Lokální soubor je prázdný.");
+  return blob;
+}
+
 async function uploadDownloadedArtifact(row, mode) {
   const st = await getState();
   const rec = st.done[row.invoiceNo] || {};
@@ -484,7 +510,24 @@ async function uploadDownloadedArtifact(row, mode) {
       capturedBinaryByInvoice.delete(row.invoiceNo);
       return;
     }
-    throw new Error(`Upload ${mode.toUpperCase()} nelze spustit: Chrome download historie nevrátila zdrojové URL.`);
+
+    if (path) {
+      const blob = await fetchLocalBlob(path);
+      const uploadResponse = await uploadBlob({
+        blob,
+        filename: `${row.invoiceNo}.${mode === "pdf" ? "pdf" : "isdoc"}`,
+        invoiceNo: row.invoiceNo,
+        orderNo: row.orderNo,
+        type,
+        sourceUrl: ""
+      });
+      await updateDone(row.invoiceNo, mode === "pdf"
+        ? { pdfServerPath: uploadResponse?.path || null, lastError: null }
+        : { isdocServerPath: uploadResponse?.path || null, lastError: null });
+      return;
+    }
+
+    throw new Error(`Upload ${mode.toUpperCase()} nelze spustit: chybí zdrojové URL i lokální cesta ke staženému souboru.`);
   }
 
   const fallbackExt = mode === "pdf" ? "pdf" : "isdoc";

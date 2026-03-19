@@ -13,3 +13,4 @@ Expected behavior:
 - saves ISDOC files under `isdoc/<orderNo>/<invoiceNo>.(isdoc|isdocx)`
 - returns JSON with `ok`, `stored`, `exists`, and `path`
 - the endpoint intentionally accepts uploads without token-based authentication
+- if uploads should fall back to reading the already-downloaded local file, enable Chrome extension access to `file://` URLs for this extension
