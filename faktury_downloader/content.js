@@ -331,7 +331,7 @@ async function completeCurrentAccountAndAdvance(config, currentAccount) {
     return await setCycleState(config, {
       index: nextIndex,
       phase: "ensure-account",
-      waitUntil: 0,
+      waitUntil: Date.now() + config.pauseMs,
       lastQueueIdleAt: 0,
       completedAccounts
     });
@@ -1114,7 +1114,7 @@ async function handleAccountCycleTick() {
       const next = await completeCurrentAccountAndAdvance(config, await getTargetAccount(config));
       const nextEmail = getAccountEmail(config.accounts[next.index]);
       if (next.waitUntil && next.waitUntil > Date.now()) {
-        setStatusText(`Účet ${targetEmail}: hotovo. Další kolo proběhne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
+        setStatusText(`Účet ${targetEmail}: hotovo. Další účet ${nextEmail} zkusím za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
         return;
       }
 
