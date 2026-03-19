@@ -9,6 +9,8 @@ let accountCycleTimer = null;
 let accountCycleBusy = false;
 
 const ACCOUNT_CYCLE_STATE_KEY = "alzaAccountCycleStateV1";
+const ACCOUNT_CYCLE_CONFIG_KEY = "alzaAccountCycleConfigV1";
+const ALZA_DOCUMENTS_ORIGIN = "https://www.alza.cz";
 
 function getAutoStartMode() {
   const params = new URLSearchParams(location.search);
@@ -19,6 +21,61 @@ function getAutoStartMode() {
   return mode === "isdoc" ? "isdoc" : "both";
 }
 
+
+async function getStoredAccountCycleConfig() {
+  try {
+    const stored = await chrome.storage.local.get(ACCOUNT_CYCLE_CONFIG_KEY);
+    const config = stored?.[ACCOUNT_CYCLE_CONFIG_KEY];
+    if (!config || !Array.isArray(config.accounts) || !config.accounts.length) return null;
+    const accounts = config.accounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+    if (!accounts.length) return null;
+    const pauseMs = Number.isFinite(config.pauseMs) && config.pauseMs > 0 ? config.pauseMs : 10 * 60 * 1000;
+    return { accounts, pauseMs };
+  } catch {
+    return null;
+  }
+}
+
+async function persistAccountCycleConfig(config) {
+  try {
+    if (!config?.accounts?.length) {
+      await chrome.storage.local.remove(ACCOUNT_CYCLE_CONFIG_KEY);
+      return;
+    }
+    await chrome.storage.local.set({
+      [ACCOUNT_CYCLE_CONFIG_KEY]: {
+        accounts: config.accounts,
+        pauseMs: config.pauseMs
+      }
+    });
+  } catch {}
+}
+
+async function getStoredCycleState(config) {
+  try {
+    const stored = await chrome.storage.local.get(ACCOUNT_CYCLE_STATE_KEY);
+    const state = stored?.[ACCOUNT_CYCLE_STATE_KEY];
+    if (!state || typeof state !== "object") return null;
+    const index = Number.isInteger(state.index) ? state.index : 0;
+    return {
+      index: ((index % config.accounts.length) + config.accounts.length) % config.accounts.length,
+      phase: typeof state.phase === "string" ? state.phase : "ensure-account",
+      waitUntil: Number.isFinite(state.waitUntil) ? state.waitUntil : 0,
+      lastQueueIdleAt: Number.isFinite(state.lastQueueIdleAt) ? state.lastQueueIdleAt : 0
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function persistCycleState(state) {
+  try {
+    await chrome.storage.local.set({
+      [ACCOUNT_CYCLE_STATE_KEY]: state
+    });
+  } catch {}
+}
+
 function getAutoRefreshIntervalMs() {
   const params = new URLSearchParams(location.search);
   const raw = Number.parseInt(params.get("alzaRefreshMinutes") || "10", 10);
@@ -26,22 +83,25 @@ function getAutoRefreshIntervalMs() {
   return minutes * 60 * 1000;
 }
 
-function getAccountCycleConfig() {
+async function getAccountCycleConfig() {
   const params = new URLSearchParams(location.search);
   const accounts = (params.get("alzaAccounts") || "")
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
 
-  if (!accounts.length) return null;
+  if (accounts.length) {
+    const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || "10", 10);
+    const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : 10;
+    const config = {
+      accounts,
+      pauseMs: pauseMinutes * 60 * 1000
+    };
+    await persistAccountCycleConfig(config);
+    return config;
+  }
 
-  const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || "10", 10);
-  const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : 10;
-
-  return {
-    accounts,
-    pauseMs: pauseMinutes * 60 * 1000
-  };
+  return await getStoredAccountCycleConfig();
 }
 
 function isDocumentsPage() {
@@ -61,15 +121,18 @@ function isAccountSwitcherPage() {
   );
 }
 
-function buildDocumentsUrlForCycle() {
-  const url = new URL(location.href);
-  url.pathname = "/my-account/documents.htm";
+function buildDocumentsUrlForCycle(config = null) {
+  const url = new URL("/my-account/documents.htm", ALZA_DOCUMENTS_ORIGIN);
   url.searchParams.set("alzaAutoStart", "1");
-  if (!url.searchParams.get("alzaAutoMode")) url.searchParams.set("alzaAutoMode", "both");
+  url.searchParams.set("alzaAutoMode", "both");
+  if (config?.accounts?.length) {
+    url.searchParams.set("alzaAccounts", config.accounts.join(","));
+    url.searchParams.set("alzaCyclePauseMinutes", String(Math.max(Math.round(config.pauseMs / 60000), 1)));
+  }
   return url.toString();
 }
 
-function getCycleState(config) {
+async function getCycleState(config) {
   const defaults = {
     index: 0,
     phase: "ensure-account",
@@ -79,34 +142,41 @@ function getCycleState(config) {
 
   try {
     const stored = JSON.parse(sessionStorage.getItem(ACCOUNT_CYCLE_STATE_KEY) || "null");
-    if (!stored || typeof stored !== "object") return defaults;
-    const index = Number.isInteger(stored.index) ? stored.index : 0;
-    return {
-      ...defaults,
-      ...stored,
-      index: ((index % config.accounts.length) + config.accounts.length) % config.accounts.length
-    };
+    if (stored && typeof stored === "object") {
+      const index = Number.isInteger(stored.index) ? stored.index : 0;
+      return {
+        ...defaults,
+        ...stored,
+        index: ((index % config.accounts.length) + config.accounts.length) % config.accounts.length
+      };
+    }
   } catch {
-    return defaults;
+    // ignore and fall back to extension storage
   }
+
+  const persisted = await getStoredCycleState(config);
+  if (!persisted) return defaults;
+  sessionStorage.setItem(ACCOUNT_CYCLE_STATE_KEY, JSON.stringify(persisted));
+  return { ...defaults, ...persisted };
 }
 
-function setCycleState(config, patch) {
-  const next = { ...getCycleState(config), ...patch };
+async function setCycleState(config, patch) {
+  const next = { ...(await getCycleState(config)), ...patch };
   sessionStorage.setItem(ACCOUNT_CYCLE_STATE_KEY, JSON.stringify(next));
+  await persistCycleState(next);
   return next;
 }
 
-function getTargetAccountEmail(config) {
-  const state = getCycleState(config);
+async function getTargetAccountEmail(config) {
+  const state = await getCycleState(config);
   return config.accounts[state.index] || config.accounts[0];
 }
 
-function advanceCycleIndex(config) {
-  const current = getCycleState(config);
+async function advanceCycleIndex(config) {
+  const current = await getCycleState(config);
   const nextIndex = (current.index + 1) % config.accounts.length;
   const wrapped = nextIndex === 0;
-  return setCycleState(config, {
+  return await setCycleState(config, {
     index: nextIndex,
     phase: "ensure-account",
     waitUntil: Date.now() + (wrapped ? config.pauseMs : 0),
@@ -187,7 +257,7 @@ function findAccountSwitchClickableByEmail(email) {
 }
 
 async function navigateToAccountSwitcher(config) {
-  setCycleState(config, { phase: "opening-switcher" });
+  await setCycleState(config, { phase: "opening-switcher" });
   if (await ensureHeaderMenuOpen()) {
     const link = findSelectAccountLink();
     if (link) {
@@ -204,7 +274,7 @@ async function navigateToAccountSwitcher(config) {
 }
 
 async function selectTargetAccount(config) {
-  const targetEmail = getTargetAccountEmail(config);
+  const targetEmail = await getTargetAccountEmail(config);
   const start = Date.now();
   while (Date.now() - start < 15000) {
     const activeBox = getActiveAccountBox();
@@ -214,12 +284,12 @@ async function selectTargetAccount(config) {
     if (candidate) {
       const candidateEmail = getAccountBoxEmail(candidate.matches?.(".account-box") ? candidate : candidate.querySelector?.(".account-box") || candidate.closest?.(".account-box"));
       if (activeEmail && candidateEmail && activeEmail === candidateEmail) {
-        setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
-        location.href = buildDocumentsUrlForCycle();
+        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+        location.href = buildDocumentsUrlForCycle(config);
         return true;
       }
 
-      setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+      await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
       candidate.click();
       return true;
     }
@@ -229,7 +299,7 @@ async function selectTargetAccount(config) {
       if (fallbackEmail) {
         const fallbackCandidate = findAccountSwitchClickableByEmail(fallbackEmail);
         if (fallbackCandidate) {
-          setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+          await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
           fallbackCandidate.click();
           return true;
         }
@@ -242,8 +312,8 @@ async function selectTargetAccount(config) {
   throw new Error(`Účet ${targetEmail} se ve switcheru nepodařilo najít.`);
 }
 
-function formatCycleStatus(config, targetEmail) {
-  const state = getCycleState(config);
+async function formatCycleStatus(config, targetEmail) {
+  const state = await getCycleState(config);
   const position = `${state.index + 1}/${config.accounts.length}`;
   const waitMs = Math.max((state.waitUntil || 0) - Date.now(), 0);
   if (waitMs > 0) {
@@ -641,8 +711,8 @@ async function autoStartIfRequested() {
   setStatusText("Autostart: nepodařilo se načíst tabulku dokladů včas.");
 }
 
-function scheduleAutoRefreshIfRequested() {
-  if (autoRefreshTimer || !getAutoStartMode() || getAccountCycleConfig()) return;
+function scheduleAutoRefreshIfRequested(accountCycleConfig = null) {
+  if (autoRefreshTimer || !getAutoStartMode() || accountCycleConfig) return;
 
   const intervalMs = getAutoRefreshIntervalMs();
   autoRefreshTimer = setInterval(async () => {
@@ -662,29 +732,29 @@ function scheduleAutoRefreshIfRequested() {
 }
 
 async function handleAccountCycleTick() {
-  const config = getAccountCycleConfig();
+  const config = await getAccountCycleConfig();
   if (!config || accountCycleBusy) return;
 
   accountCycleBusy = true;
   try {
-    const targetEmail = getTargetAccountEmail(config);
-    const cycleState = getCycleState(config);
+    const targetEmail = await getTargetAccountEmail(config);
+    const cycleState = await getCycleState(config);
 
     ensureSidebar();
-    setStatusText(formatCycleStatus(config, targetEmail));
+    setStatusText(await formatCycleStatus(config, targetEmail));
 
     if (cycleState.waitUntil && Date.now() < cycleState.waitUntil) return;
 
     if (isAccountSwitcherPage()) {
-      setStatusText(`${formatCycleStatus(config, targetEmail)} • vybírám účet ve switcheru…`);
+      setStatusText(`${await formatCycleStatus(config, targetEmail)} • vybírám účet ve switcheru…`);
       await selectTargetAccount(config);
       return;
     }
 
     if (!isDocumentsPage()) {
       if (cycleState.phase === "await-documents" || cycleState.phase === "processing") {
-        setStatusText(`${formatCycleStatus(config, targetEmail)} • otevírám stránku dokladů…`);
-        location.href = buildDocumentsUrlForCycle();
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • otevírám stránku dokladů…`);
+        location.href = buildDocumentsUrlForCycle(config);
         return;
       }
       return;
@@ -694,41 +764,41 @@ async function handleAccountCycleTick() {
     const bgState = resp?.ok ? resp.state : null;
 
     if (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher") {
-      setStatusText(`${formatCycleStatus(config, targetEmail)} • otevírám account switcher…`);
+      setStatusText(`${await formatCycleStatus(config, targetEmail)} • otevírám account switcher…`);
       await navigateToAccountSwitcher(config);
       return;
     }
 
     if (cycleState.phase === "await-documents") {
-      setCycleState(config, { phase: "processing", waitUntil: 0, lastQueueIdleAt: 0 });
+      await setCycleState(config, { phase: "processing", waitUntil: 0, lastQueueIdleAt: 0 });
       autoStartAttempted = false;
       autoStartTriggered = false;
-      setStatusText(`${formatCycleStatus(config, targetEmail)} • spouštím autostart…`);
+      setStatusText(`${await formatCycleStatus(config, targetEmail)} • spouštím autostart…`);
       await autoStartIfRequested();
       return;
     }
 
     if (cycleState.phase === "processing") {
       if (bgState?.running) {
-        setCycleState(config, { lastQueueIdleAt: 0 });
-        setStatusText(`${formatCycleStatus(config, targetEmail)} • fronta běží…`);
+        await setCycleState(config, { lastQueueIdleAt: 0 });
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • fronta běží…`);
         return;
       }
 
-      const current = getCycleState(config);
+      const current = await getCycleState(config);
       const idleAt = current.lastQueueIdleAt || Date.now();
       if (!current.lastQueueIdleAt) {
-        setCycleState(config, { lastQueueIdleAt: idleAt });
-        setStatusText(`${formatCycleStatus(config, targetEmail)} • čekám na dokončení uploadů…`);
+        await setCycleState(config, { lastQueueIdleAt: idleAt });
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • čekám na dokončení uploadů…`);
         return;
       }
 
       if (Date.now() - idleAt < 15000) {
-        setStatusText(`${formatCycleStatus(config, targetEmail)} • dokončuji poslední operace…`);
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • dokončuji poslední operace…`);
         return;
       }
 
-      const next = advanceCycleIndex(config);
+      const next = await advanceCycleIndex(config);
       const nextEmail = config.accounts[next.index];
       if (next.waitUntil && next.waitUntil > Date.now()) {
         setStatusText(`Účet ${targetEmail}: hotovo. Další kolo začne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
@@ -747,8 +817,9 @@ async function handleAccountCycleTick() {
   }
 }
 
-function scheduleAccountCycleIfRequested() {
-  if (accountCycleTimer || !getAccountCycleConfig()) return;
+async function scheduleAccountCycleIfRequested() {
+  const config = await getAccountCycleConfig();
+  if (accountCycleTimer || !config) return;
 
   accountCycleTimer = setInterval(() => {
     handleAccountCycleTick().catch(() => {});
@@ -803,22 +874,22 @@ window.addEventListener("ALZA_PAGE_DOWNLOAD_URL_RESULT", (event) => {
   if (resolver) resolver(detail);
 });
 
-(function init() {
-  const accountCycleConfig = getAccountCycleConfig();
+(async function init() {
+  const accountCycleConfig = await getAccountCycleConfig();
   const onDocumentsPage = isDocumentsPage();
 
   if (!onDocumentsPage && !accountCycleConfig) return;
 
   if (accountCycleConfig) {
     ensureSidebar();
-    scheduleAccountCycleIfRequested();
+    await scheduleAccountCycleIfRequested();
   }
 
   if (!onDocumentsPage) return;
 
   injectPageBridge();
   attachRows().catch(() => {});
-  scheduleAutoRefreshIfRequested();
+  scheduleAutoRefreshIfRequested(accountCycleConfig);
   if (accountCycleConfig) return;
   autoStartIfRequested().catch((err) => {
     ensureSidebar();
