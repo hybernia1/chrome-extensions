@@ -133,6 +133,13 @@ function buildDocumentsUrlForCycle(config = null) {
   return url.toString();
 }
 
+function buildAccountSwitcherUrl() {
+  const url = new URL("/external/login", ALZA_DOCUMENTS_ORIGIN);
+  url.searchParams.set("inherit", "false");
+  url.searchParams.set("prompt", "select_account");
+  return url.toString();
+}
+
 async function getCycleState(config) {
   const defaults = {
     index: 0,
@@ -259,18 +266,7 @@ function findAccountSwitchClickableByEmail(email) {
 
 async function navigateToAccountSwitcher(config) {
   await setCycleState(config, { phase: "opening-switcher" });
-  if (await ensureHeaderMenuOpen()) {
-    const link = findSelectAccountLink();
-    if (link) {
-      link.click();
-      return true;
-    }
-  }
-
-  const fallback = new URL("/external/login", location.origin);
-  fallback.searchParams.set("inherit", "false");
-  fallback.searchParams.set("prompt", "select_account");
-  location.href = fallback.toString();
+  location.href = buildAccountSwitcherUrl();
   return true;
 }
 
