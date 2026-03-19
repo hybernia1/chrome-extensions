@@ -447,6 +447,17 @@ function getActiveAccountBox() {
   return document.querySelector(".account-box.active") || null;
 }
 
+function getCurrentDocumentsPageAccount() {
+  const email = (
+    document.querySelector("[data-testid='headerUserLogin']")?.textContent ||
+    document.querySelector("header .user-info--email")?.textContent ||
+    ""
+  ).trim().toLowerCase();
+
+  if (!email) return null;
+  return normalizeAccountRecord({ email });
+}
+
 function findAccountSwitchClickable(account) {
   const normalized = normalizeAccountRecord(account);
   const key = getAccountKey(normalized);
@@ -645,6 +656,38 @@ async function redirectToDocumentsPageForCycle(config, reasonText = "otevírám 
   setStatusText(`${await formatCycleStatus(config, targetEmail)} • ${reasonText}`);
   await sleep(750);
   location.href = buildDocumentsUrlForCycle(config);
+}
+
+async function syncCycleStateWithDocumentsAccount(config) {
+  if (!isDocumentsPage()) {
+    return {
+      state: await getCycleState(config),
+      activeAccount: null
+    };
+  }
+
+  const activeAccount = getCurrentDocumentsPageAccount();
+  let state = await getCycleState(config);
+  if (!activeAccount) {
+    return { state, activeAccount: null };
+  }
+
+  const matchedIndex = config.accounts.findIndex((account) => {
+    const normalized = normalizeAccountRecord(account);
+    return (
+      (!!activeAccount.sessionId && normalized.sessionId === activeAccount.sessionId) ||
+      (!!activeAccount.email && normalized.email === activeAccount.email)
+    );
+  });
+
+  if (matchedIndex >= 0 && matchedIndex !== state.index) {
+    state = await setCycleState(config, {
+      index: matchedIndex,
+      lastQueueIdleAt: 0
+    });
+  }
+
+  return { state, activeAccount };
 }
 
 async function formatCycleStatus(config, targetEmail) {
@@ -1167,7 +1210,7 @@ async function handleAccountCycleTick() {
         roundComplete: false
       });
     }
-    const targetEmail = await getTargetAccountEmail(config);
+    let targetEmail = await getTargetAccountEmail(config);
 
     ensureSidebar();
     setStatusText(await formatCycleStatus(config, targetEmail));
@@ -1197,6 +1240,10 @@ async function handleAccountCycleTick() {
       }
       return;
     }
+
+    const documentsAccountSync = await syncCycleStateWithDocumentsAccount(config);
+    cycleState = documentsAccountSync.state;
+    targetEmail = await getTargetAccountEmail(config);
 
     const resp = await chrome.runtime.sendMessage({ type: "ALZA_GET_STATE" });
     const bgState = resp?.ok ? resp.state : null;
@@ -1240,7 +1287,10 @@ async function handleAccountCycleTick() {
         return;
       }
 
-      const next = await completeCurrentAccountAndAdvance(config, await getTargetAccount(config));
+      const next = await completeCurrentAccountAndAdvance(
+        config,
+        documentsAccountSync.activeAccount || await getTargetAccount(config)
+      );
       const nextEmail = getAccountEmail(config.accounts[next.index]);
       if (next.waitUntil && next.waitUntil > Date.now()) {
         setStatusText(`Účet ${targetEmail}: hotovo. Další účet ${nextEmail} zkusím za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
