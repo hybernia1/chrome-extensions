@@ -1,113 +1,78 @@
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const digits = (s) => (s || "").replace(/[^\d]/g, "");
 
-function extractRowsFromTable() {
-  const table = document.querySelector("table");
-  if (!table) return [];
+let sidebarEl = null;
 
-  const rows = Array.from(table.querySelectorAll("tbody tr"));
-  return rows.map(tr => {
-    const tds = tr.querySelectorAll("td");
-    if (tds.length < 2) return null;
-
-    const invoiceText = (tds[0].innerText || "").trim();
-    const invoiceNo = digits(invoiceText);
-
-    const orderLink = tds[1].querySelector("a[title]");
-    const orderNo = digits(orderLink?.getAttribute("title") || "");
-
-    return (invoiceNo && orderNo) ? { invoiceNo, orderNo } : null;
-  }).filter(Boolean);
+function findArchiveItems() {
+  return Array.from(document.querySelectorAll('[data-testid="ordersArchive-panel"] > div'))
+    .filter((el) => el.querySelector('a[href*="/my-account/order-details-"]'));
 }
 
-function findTrByInvoice(invoiceNo) {
-  const table = document.querySelector("table");
-  if (!table) return null;
-  const trs = Array.from(table.querySelectorAll("tbody tr"));
-  return trs.find(tr => (tr.innerText || "").includes(invoiceNo)) || null;
+function getReactFiber(node) {
+  if (!node) return null;
+  const key = Object.keys(node).find((item) => item.startsWith('__reactFiber$'));
+  return key ? node[key] : null;
 }
 
-function clickInvoiceInTr(tr) {
-  const td0 = tr.querySelector("td");
-  const clickable = td0?.querySelector("span");
-  if (!clickable) throw new Error("Klikací span (Faktura) nenalezen.");
-  clickable.click();
-}
-
-async function waitForFormatModal(timeoutMs = 15000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const modal = document.querySelector(".MuiDialog-paper[role='dialog']");
-    if (modal) return modal;
-    await sleep(100);
-  }
-  throw new Error("Modal s formáty (PDF/ISDOC) se neotevřel");
-}
-
-function findButtonByExactText(root, text) {
-  const up = text.toUpperCase();
-  const btns = Array.from(root.querySelectorAll("button"));
-  return btns.find(b => (b.textContent || "").trim().toUpperCase() === up) || null;
-}
-
-async function waitForDownloadStartedModal(timeoutMs = 10000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const h3 = Array.from(document.querySelectorAll("h3")).find(n =>
-      (n.textContent || "").includes("Stahování souboru začalo")
-    );
-    if (h3) return h3.closest(".reactPage-alz-199") || h3.closest("div") || h3;
-    await sleep(100);
+function getAttachmentFromInvoiceNode(node) {
+  let fiber = getReactFiber(node);
+  for (let i = 0; i < 12 && fiber; i++) {
+    const attachments = fiber.memoizedProps?.attachments;
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      return attachments[0];
+    }
+    fiber = fiber.return;
   }
   return null;
 }
 
-async function closeDownloadStartedModal(modalRoot) {
-  if (!modalRoot) return;
-  const closeBtn = findButtonByExactText(modalRoot, "Zavřít");
-  if (closeBtn) closeBtn.click();
-  await sleep(200);
+function getInvoiceButton(card) {
+  return Array.from(card.querySelectorAll('span[role="button"]'))
+    .find((el) => /^Faktura\s+\d+/i.test((el.textContent || '').trim()));
 }
 
-async function closeFormatModal(modal) {
-  const closeBtn =
-    modal.querySelector("[data-testid='dialog-close-button']") ||
-    document.querySelector("[data-testid='dialog-close-button']");
-  if (closeBtn) closeBtn.click();
-  await sleep(250);
-}
-
-async function clickDownloads(modal, mode) {
-  const pdfBtn = findButtonByExactText(modal, "PDF");
-  const isdocBtn = findButtonByExactText(modal, "ISDOC");
-  if (!pdfBtn || !isdocBtn) throw new Error("Nenalezeno PDF/ISDOC tlačítko.");
-
-  if (mode === "pdf" || mode === "both") {
-    pdfBtn.click();
-    await sleep(250);
-    await closeDownloadStartedModal(await waitForDownloadStartedModal(8000));
-  }
-
-  if (mode === "isdoc" || mode === "both") {
-    isdocBtn.click();
-    await sleep(250);
-    await closeDownloadStartedModal(await waitForDownloadStartedModal(8000));
+function extractDocumentId(isdocOptionsUrl) {
+  if (!isdocOptionsUrl) return null;
+  try {
+    return new URL(isdocOptionsUrl).searchParams.get('documentIds');
+  } catch {
+    return null;
   }
 }
 
-function restoreScroll(savedY, tr) {
-  window.scrollTo({ top: savedY, left: 0, behavior: "instant" });
-  try { tr.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
+function extractRowsFromCards() {
+  return findArchiveItems().map((card) => {
+    const orderLink = card.querySelector('a[href*="/my-account/order-details-"]');
+    const invoiceButton = getInvoiceButton(card);
+    if (!orderLink || !invoiceButton) return null;
+
+    const orderNo = digits(orderLink.textContent || orderLink.getAttribute('href') || '');
+    const invoiceNo = digits(invoiceButton.textContent || '');
+    const attachment = getAttachmentFromInvoiceNode(invoiceButton);
+    const pdfUrl = attachment?.self?.href || null;
+    const isdocOptionsUrl = attachment?.isdocAction?.href || null;
+    const documentId = extractDocumentId(isdocOptionsUrl);
+
+    if (!invoiceNo || !orderNo) return null;
+
+    return {
+      invoiceNo,
+      orderNo,
+      documentId,
+      pdfUrl,
+      isdocOptionsUrl
+    };
+  }).filter(Boolean);
 }
 
-// ---------------- Sidebar UI ----------------
-let sidebarEl = null;
+function findCardByInvoice(invoiceNo) {
+  return findArchiveItems().find((card) => (card.textContent || '').includes(invoiceNo)) || null;
+}
 
 function ensureSidebar() {
   if (sidebarEl) return;
 
-  sidebarEl = document.createElement("div");
-  sidebarEl.id = "alzaSidebar";
+  sidebarEl = document.createElement('div');
+  sidebarEl.id = 'alzaSidebar';
   sidebarEl.innerHTML = `
     <div class="alzaSbHeader">
       <div class="alzaSbTitle">Alza Doklady</div>
@@ -127,10 +92,10 @@ function ensureSidebar() {
     </div>
   `;
 
-  const style = document.createElement("style");
+  const style = document.createElement('style');
   style.textContent = `
     #alzaSidebar{
-      position:fixed; top:0; right:0; height:100vh; width:460px;
+      position:fixed; top:0; right:0; height:100vh; width:480px;
       z-index:2147483647;
       background:#0f1115; color:#e7e7e7;
       border-left:1px solid rgba(255,255,255,.12);
@@ -166,114 +131,95 @@ function ensureSidebar() {
       border-radius:8px;
     }
     .alzaSbRowErr{ margin-top:8px; opacity:.9; color:#ffb4b4; }
+    .alzaSbRowMeta{ margin-top:8px; opacity:.9; color:#bcd4ff; word-break:break-all; }
   `;
+
   document.documentElement.appendChild(style);
   document.documentElement.appendChild(sidebarEl);
 
-  document.getElementById("alzaSbRefresh").addEventListener("click", async () => {
+  document.getElementById('alzaSbRefresh').addEventListener('click', async () => {
     await attachRows();
   });
-
-  document.getElementById("alzaSbStartAll").addEventListener("click", async () => {
-    await chrome.runtime.sendMessage({ type: "ALZA_START_ALL" });
+  document.getElementById('alzaSbStartAll').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ type: 'ALZA_START_ALL' });
   });
-
-  document.getElementById("alzaSbStartIsdoc").addEventListener("click", async () => {
-    await chrome.runtime.sendMessage({ type: "ALZA_START_ISDOC" });
+  document.getElementById('alzaSbStartIsdoc').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ type: 'ALZA_START_ISDOC' });
   });
-
-  document.getElementById("alzaSbStop").addEventListener("click", async () => {
-    await chrome.runtime.sendMessage({ type: "ALZA_STOP" });
+  document.getElementById('alzaSbStop').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ type: 'ALZA_STOP' });
   });
-
-  document.getElementById("alzaSbClear").addEventListener("click", async () => {
-    await chrome.runtime.sendMessage({ type: "ALZA_CLEAR_DATA" });
+  document.getElementById('alzaSbClear').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ type: 'ALZA_CLEAR_DATA' });
     await attachRows();
   });
 }
 
-function setStatusText(t) {
-  const el = document.getElementById("alzaSbStatus");
-  if (el) el.textContent = t || "-";
+function setStatusText(text) {
+  const el = document.getElementById('alzaSbStatus');
+  if (el) el.textContent = text || '-';
 }
 
 function rowPills(rec) {
-  const pdfClass = rec?.pdf ? "ok" : (rec?.lastError ? "bad" : "mid");
-  const isdocClass = rec?.isdoc ? "ok" : (rec?.lastError ? "bad" : "mid");
+  const pdfClass = rec?.pdf ? 'ok' : (rec?.lastError && !rec?.pdf ? 'bad' : 'mid');
+  const isdocClass = rec?.isdoc ? 'ok' : (rec?.lastError && !rec?.isdoc ? 'bad' : 'mid');
   return `
-    <span class="pill ${pdfClass}">PDF: ${rec?.pdf ? "OK" : "NO"}</span>
-    <span class="pill ${isdocClass}">ISDOC: ${rec?.isdoc ? "OK" : "NO"}</span>
+    <span class="pill ${pdfClass}">PDF: ${rec?.pdf ? 'OK' : 'NO'}</span>
+    <span class="pill ${isdocClass}">ISDOC: ${rec?.isdoc ? 'OK' : 'NO'}</span>
   `;
 }
 
-function rowLinks(rec, invoiceNo) {
-  const pdf = rec?.pdfPath
-    ? `<button data-act="openPdf" data-inv="${invoiceNo}">Otevřít PDF</button>`
-    : `<button disabled title="PDF nenalezeno">Otevřít PDF</button>`;
-  const isdoc = rec?.isdocPath
-    ? `<button data-act="openIsdoc" data-inv="${invoiceNo}">Otevřít ISDOC</button>`
-    : `<button disabled title="ISDOC nenalezen">Otevřít ISDOC</button>`;
-
-  return `${pdf}${isdoc}`;
-}
-
 function renderList(state) {
-  const list = document.getElementById("alzaSbList");
+  const list = document.getElementById('alzaSbList');
   if (!list) return;
 
   const done = state.done || {};
   const active = state.active;
 
-  list.innerHTML = state.rows.map(r => {
-    const rec = done[r.invoiceNo] || {};
-    const isActive = active && active.invoiceNo === r.invoiceNo;
-    const title = `${r.invoiceNo} • ${r.orderNo}`;
-    const err = rec.lastError ? `<div class="alzaSbRowErr">Error: ${rec.lastError}</div>` : "";
-    const activeTag = isActive ? `<span class="pill mid">ACTIVE: ${active.mode}</span>` : "";
+  list.innerHTML = state.rows.map((row) => {
+    const rec = done[row.invoiceNo] || {};
+    const isActive = active && active.invoiceNo === row.invoiceNo;
+    const error = rec.lastError ? `<div class="alzaSbRowErr">Error: ${rec.lastError}</div>` : '';
+    const activeTag = isActive ? `<span class="pill mid">ACTIVE: ${active.mode}</span>` : '';
+    const serverPaths = `
+      PDF server: ${rec?.pdfServerPath || '-'}<br>
+      ISDOC server: ${rec?.isdocServerPath || '-'}<br>
+      documentId: ${row.documentId || '-'}
+    `;
 
     return `
-      <div class="alzaSbRow" data-inv="${r.invoiceNo}">
+      <div class="alzaSbRow" data-inv="${row.invoiceNo}">
         <div class="alzaSbRowTop">
-          <div class="mono">${title}</div>
+          <div class="mono">${row.invoiceNo} • ${row.orderNo}</div>
           <div style="display:flex; gap:6px; align-items:center;">
             ${activeTag}
             ${rowPills(rec)}
           </div>
         </div>
-
         <div class="alzaSbRowMid">
-          <button data-act="retryPdf" data-inv="${r.invoiceNo}">Retry PDF</button>
-          <button data-act="retryIsdoc" data-inv="${r.invoiceNo}">Retry ISDOC</button>
-          <button data-act="retryBoth" data-inv="${r.invoiceNo}">Retry obojí</button>
-          ${rowLinks(rec, r.invoiceNo)}
-          <button data-act="scroll" data-inv="${r.invoiceNo}">Scroll</button>
+          <button data-act="retryPdf" data-inv="${row.invoiceNo}">Retry PDF</button>
+          <button data-act="retryIsdoc" data-inv="${row.invoiceNo}">Retry ISDOC</button>
+          <button data-act="retryBoth" data-inv="${row.invoiceNo}">Retry obojí</button>
+          <button data-act="scroll" data-inv="${row.invoiceNo}">Scroll</button>
         </div>
-
-        <div class="alzaSbRowErr" style="color:#bcd4ff;">
-          ${rec?.pdfPath ? `PDF: ${rec.pdfPath}` : "PDF: -"}<br>
-          ${rec?.isdocPath ? `ISDOC: ${rec.isdocPath}` : "ISDOC: -"}
-        </div>
-
-        ${err}
+        <div class="alzaSbRowMeta">${serverPaths}</div>
+        ${error}
       </div>
     `;
-  }).join("");
+  }).join('');
 
-  list.querySelectorAll("button").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      const inv = btn.getAttribute("data-inv");
-      const act = btn.getAttribute("data-act");
+  list.querySelectorAll('button').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const inv = btn.getAttribute('data-inv');
+      const act = btn.getAttribute('data-act');
       if (!inv || !act) return;
 
-      if (act === "retryPdf") await chrome.runtime.sendMessage({ type: "ALZA_RETRY", invoiceNo: inv, mode: "pdf" });
-      if (act === "retryIsdoc") await chrome.runtime.sendMessage({ type: "ALZA_RETRY", invoiceNo: inv, mode: "isdoc" });
-      if (act === "retryBoth") await chrome.runtime.sendMessage({ type: "ALZA_RETRY", invoiceNo: inv, mode: "both" });
-      if (act === "openPdf") await chrome.runtime.sendMessage({ type: "ALZA_OPEN_DOWNLOADED", invoiceNo: inv, mode: "pdf" });
-      if (act === "openIsdoc") await chrome.runtime.sendMessage({ type: "ALZA_OPEN_DOWNLOADED", invoiceNo: inv, mode: "isdoc" });
-
-      if (act === "scroll") {
-        const tr = findTrByInvoice(inv);
-        if (tr) tr.scrollIntoView({ block: "center", inline: "nearest" });
+      if (act === 'retryPdf') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'pdf' });
+      if (act === 'retryIsdoc') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'isdoc' });
+      if (act === 'retryBoth') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'both' });
+      if (act === 'scroll') {
+        const card = findCardByInvoice(inv);
+        if (card) card.scrollIntoView({ block: 'center', inline: 'nearest' });
       }
     });
   });
@@ -281,55 +227,24 @@ function renderList(state) {
 
 async function attachRows() {
   ensureSidebar();
-
-  const rows = extractRowsFromTable();
-  await chrome.runtime.sendMessage({ type: "ALZA_ATTACH", rows });
-
-  const resp = await chrome.runtime.sendMessage({ type: "ALZA_GET_STATE" });
-  if (resp?.ok) renderList(resp.state);
+  const rows = extractRowsFromCards();
+  await chrome.runtime.sendMessage({ type: 'ALZA_ATTACH', rows });
+  const response = await chrome.runtime.sendMessage({ type: 'ALZA_GET_STATE' });
+  if (response?.ok) renderList(response.state);
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === "ALZA_STATUS") {
+  if (msg?.type === 'ALZA_STATUS') {
     ensureSidebar();
     setStatusText(msg.text);
   }
-  if (msg?.type === "ALZA_STATE") {
+  if (msg?.type === 'ALZA_STATE') {
     ensureSidebar();
     renderList(msg.state);
-  }
-  if (msg?.type === "ALZA_RUN_ROW") {
-    (async () => {
-      const { invoiceNo, mode, runId } = msg;
-
-      const savedY = window.scrollY;
-      const tr = findTrByInvoice(invoiceNo);
-      if (!tr) throw new Error(`Řádek faktury ${invoiceNo} nenalezen.`);
-
-      tr.scrollIntoView({ block: "center", inline: "nearest" });
-      await sleep(150);
-
-      clickInvoiceInTr(tr);
-      const modal = await waitForFormatModal(15000);
-
-      await clickDownloads(modal, mode);
-      await closeFormatModal(modal);
-
-      await sleep(100);
-      restoreScroll(savedY, tr);
-      await chrome.runtime.sendMessage({ type: "ALZA_RUN_ROW_RESULT", runId, ok: true });
-    })().catch(async (err) => {
-      await chrome.runtime.sendMessage({
-        type: "ALZA_RUN_ROW_RESULT",
-        runId: msg.runId,
-        ok: false,
-        error: err?.message || "Execution failed"
-      });
-    });
   }
 });
 
 (function init() {
-  if (!location.href.includes("documents")) return;
+  if (!location.href.includes('orders')) return;
   attachRows().catch(() => {});
 })();
