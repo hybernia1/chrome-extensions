@@ -17,7 +17,8 @@ async function getState() {
     done: {},
     running: false,
     active: null,
-    queue: []
+    queue: [],
+    apiStatus: { connected: false, checkedAt: null, message: "Neověřeno." }
   };
 }
 
@@ -74,6 +75,35 @@ async function setStatus(text) {
   const st = await getState();
   if (!st.tabId) return;
   await sendToTab(st.tabId, { type: "ALZA_STATUS", text });
+}
+
+async function checkUploadEndpointHealth() {
+  try {
+    const response = await fetch(UPLOAD_ENDPOINT, {
+      method: "OPTIONS"
+    });
+
+    const message = response.ok || response.status === 204 || response.status === 405
+      ? `API dosažitelné (HTTP ${response.status}).`
+      : `API odpovědělo HTTP ${response.status}.`;
+
+    const apiStatus = {
+      connected: response.ok || response.status === 204 || response.status === 405,
+      checkedAt: Date.now(),
+      message
+    };
+
+    await setState({ apiStatus });
+    return apiStatus;
+  } catch (error) {
+    const apiStatus = {
+      connected: false,
+      checkedAt: Date.now(),
+      message: error?.message || "Upload API není dostupné."
+    };
+    await setState({ apiStatus });
+    return apiStatus;
+  }
 }
 
 async function requestIsdocAttachmentFromPage(invoiceNo) {
@@ -473,6 +503,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       const st = await getState();
       await setState({ tabId, windowId, rows: msg.rows || st.rows || [] });
+      await checkUploadEndpointHealth();
       await pushStateToUI();
       return sendResponse({ ok: true });
     }
@@ -486,6 +517,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const st = await getState();
       if (!st.tabId) return sendResponse({ ok: false, error: "No tab" });
 
+      await checkUploadEndpointHealth();
       const queue = await buildQueueFromRows(st.rows, "both");
       await setState({ running: true, queue });
       await setStatus(`Start all: ${queue.length} položek`);
@@ -498,6 +530,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const st = await getState();
       if (!st.tabId) return sendResponse({ ok: false, error: "No tab" });
 
+      await checkUploadEndpointHealth();
       const queue = await buildQueueFromRows(st.rows, "isdoc");
       await setState({ running: true, queue });
       await setStatus(`Start ISDOC: ${queue.length} položek`);
@@ -528,12 +561,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           done: {},
           running: false,
           active: null,
-          queue: []
+          queue: [],
+          apiStatus: { connected: false, checkedAt: null, message: "Neověřeno." }
         }
       });
       await sendToTab(tabId, { type: "ALZA_STATUS", text: "Lokální stav smazán." });
       await sendToTab(tabId, { type: "ALZA_STATE", state: await getState() });
       return sendResponse({ ok: true });
+    }
+
+    if (msg.type === "ALZA_PING_UPLOAD_API") {
+      const apiStatus = await checkUploadEndpointHealth();
+      await pushStateToUI();
+      return sendResponse({ ok: true, apiStatus });
     }
 
     if (msg.type === "ALZA_RETRY") {

@@ -16,7 +16,7 @@ function getReactFiber(node) {
   return key ? node[key] : null;
 }
 
-function getAttachmentContextFromInvoiceNode(node) {
+function findFiberContext(node) {
   let fiber = getReactFiber(node);
   for (let i = 0; i < 12 && fiber; i++) {
     const attachments = fiber.memoizedProps?.attachments;
@@ -29,13 +29,23 @@ function getAttachmentContextFromInvoiceNode(node) {
   return null;
 }
 
+function getAttachmentContextFromInvoiceNode(node) {
+  let current = node;
+  for (let i = 0; i < 6 && current; i++) {
+    const context = findFiberContext(current);
+    if (context) return context;
+    current = current.parentElement;
+  }
+  return null;
+}
+
 function getAttachmentFromInvoiceNode(node) {
   return getAttachmentContextFromInvoiceNode(node)?.attachment || null;
 }
 
 function getInvoiceButton(card) {
-  return Array.from(card.querySelectorAll('span[role="button"]'))
-    .find((el) => /^Faktura\s+\d+/i.test((el.textContent || '').trim()));
+  const candidates = Array.from(card.querySelectorAll('span[role="button"], span, a, button, div'));
+  return candidates.find((el) => /^Faktura\s+\d+/i.test((el.textContent || '').trim()));
 }
 
 function extractDocumentId(isdocOptionsUrl) {
@@ -95,8 +105,8 @@ function injectPageBridge() {
       }
 
       function getInvoiceButton(card) {
-        return Array.from(card.querySelectorAll('span[role="button"]'))
-          .find((el) => /^Faktura\s+\d+/i.test((el.textContent || '').trim()));
+        const candidates = Array.from(card.querySelectorAll('span[role="button"], span, a, button, div'));
+        return candidates.find((el) => /^Faktura\s+\d+/i.test((el.textContent || '').trim()));
       }
 
       function findCardByInvoice(invoiceNo) {
@@ -234,6 +244,13 @@ function resolveIsdocAttachmentViaPage(invoiceNo) {
   });
 }
 
+function formatApiStatus(apiStatus) {
+  if (!apiStatus?.checkedAt) return `<span class="pill mid">API: NEOVĚŘENO</span>`;
+  const cls = apiStatus.connected ? "ok" : "bad";
+  const label = apiStatus.connected ? "API: OK" : "API: OFF";
+  return `<span class="pill ${cls}" title="${apiStatus?.message || ""}">${label}</span>`;
+}
+
 function ensureSidebar() {
   if (sidebarEl) return;
 
@@ -252,6 +269,7 @@ function ensureSidebar() {
         <button id="alzaSbClear">Clear data</button>
       </div>
       <div id="alzaSbStatus" class="alzaSbStatus">-</div>
+      <div id="alzaSbApiStatus" class="alzaSbStatus">API: -</div>
     </div>
     <div class="alzaSbBody">
       <div id="alzaSbList" class="alzaSbList"></div>
@@ -326,6 +344,13 @@ function setStatusText(text) {
   if (el) el.textContent = text || '-';
 }
 
+function setApiStatus(apiStatus) {
+  const el = document.getElementById('alzaSbApiStatus');
+  if (!el) return;
+  const checked = apiStatus?.checkedAt ? new Date(apiStatus.checkedAt).toLocaleTimeString() : '-';
+  el.innerHTML = `${formatApiStatus(apiStatus)} <span style="opacity:.8">${apiStatus?.message || 'Neověřeno.'} • ${checked}</span>`;
+}
+
 function rowPills(rec) {
   const pdfClass = rec?.pdf ? 'ok' : (rec?.lastError && !rec?.pdf ? 'bad' : 'mid');
   const isdocClass = rec?.isdoc ? 'ok' : (rec?.lastError && !rec?.isdoc ? 'bad' : 'mid');
@@ -341,6 +366,7 @@ function renderList(state) {
 
   const done = state.done || {};
   const active = state.active;
+  setApiStatus(state.apiStatus);
 
   list.innerHTML = state.rows.map((row) => {
     const rec = done[row.invoiceNo] || {};
@@ -350,6 +376,8 @@ function renderList(state) {
     const serverPaths = `
       PDF server: ${rec?.pdfServerPath || '-'}<br>
       ISDOC server: ${rec?.isdocServerPath || '-'}<br>
+      PDF URL: ${row.pdfUrl ? 'ANO' : 'NE'}<br>
+      ISDOC options: ${row.isdocOptionsUrl ? 'ANO' : 'NE'}<br>
       documentId: ${row.documentId || '-'}
     `;
 
@@ -393,8 +421,18 @@ function renderList(state) {
 
 async function attachRows() {
   ensureSidebar();
-  const rows = extractRowsFromCards();
+  let rows = extractRowsFromCards();
+
+  if (!rows.some((row) => row.pdfUrl || row.isdocOptionsUrl)) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      rows = extractRowsFromCards();
+      if (rows.some((row) => row.pdfUrl || row.isdocOptionsUrl)) break;
+    }
+  }
+
   await chrome.runtime.sendMessage({ type: 'ALZA_ATTACH', rows });
+  await chrome.runtime.sendMessage({ type: 'ALZA_PING_UPLOAD_API' });
   const response = await chrome.runtime.sendMessage({ type: 'ALZA_GET_STATE' });
   if (response?.ok) renderList(response.state);
 }
