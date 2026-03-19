@@ -272,9 +272,7 @@ async function navigateToAccountSwitcher(config) {
       return true;
     }
   }
-
-  location.href = buildAccountSwitcherUrl();
-  return true;
+  throw new Error("Nepodařilo se otevřít header menu nebo najít odkaz Přepnout účet.");
 }
 
 async function selectTargetAccount(config) {
@@ -852,13 +850,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     ensureSidebar();
     setStatusText(msg.text);
     if (typeof msg.text === "string" && msg.text.startsWith("Queue prázdná")) {
-      const currentHref = location.href;
       triggerAccountSwitchAfterQueueEmpty().catch(() => {});
-      setTimeout(() => {
-        if (location.href === currentHref) {
-          location.href = buildAccountSwitcherUrl();
-        }
-      }, 750);
     }
   }
   if (msg?.type === "ALZA_STATE") {
