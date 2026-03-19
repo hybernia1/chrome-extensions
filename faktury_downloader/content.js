@@ -503,6 +503,36 @@ async function syncCycleConfigWithSwitcherAccounts(config) {
   return nextConfig;
 }
 
+async function getNextTargetAccountFromSwitcher(config) {
+  const discoveredAccounts = getAccountRecordsFromSwitcher();
+  if (!discoveredAccounts.length) return null;
+
+  const cycleState = await getCycleState(config);
+  const completed = new Set(cycleState.completedAccounts || []);
+  const activeKey = getAccountKey({
+    sessionId: getAccountBoxSessionId(getActiveAccountBox()),
+    email: getAccountBoxEmail(getActiveAccountBox())
+  });
+  const activeIndex = discoveredAccounts.findIndex((account) => getAccountKey(account) === activeKey);
+  const orderedAccounts = activeIndex >= 0
+    ? [...discoveredAccounts.slice(activeIndex + 1), ...discoveredAccounts.slice(0, activeIndex + 1)]
+    : discoveredAccounts;
+  const nextAccount = orderedAccounts.find((account) => !completed.has(getAccountKey(account))) || orderedAccounts[0];
+  if (!nextAccount) return null;
+
+  const nextIndex = config.accounts.findIndex((account) => getAccountKey(account) === getAccountKey(nextAccount));
+  if (nextIndex >= 0 && nextIndex !== cycleState.index) {
+    await setCycleState(config, {
+      index: nextIndex,
+      phase: "opening-switcher",
+      waitUntil: 0,
+      lastQueueIdleAt: 0
+    });
+  }
+
+  return normalizeAccountRecord(nextAccount);
+}
+
 async function navigateToAccountSwitcher(config = null) {
   if (config) {
     await setCycleState(config, { phase: "opening-switcher" });
@@ -528,7 +558,7 @@ async function selectTargetAccount(config = null) {
     config = await syncCycleConfigWithSwitcherAccounts(config);
   }
   const start = Date.now();
-  let targetAccount = config ? await getTargetAccount(config) : null;
+  let targetAccount = config ? (await getNextTargetAccountFromSwitcher(config)) || (await getTargetAccount(config)) : null;
   while (Date.now() - start < 15000) {
     if (targetAccount && isTargetAccountAlreadyActive(targetAccount) && config?.accounts?.length > 1) {
       const activeKey = getAccountKey({
