@@ -139,6 +139,20 @@ function buildAccountSwitcherUrl() {
   return url.toString();
 }
 
+function getHeaderHydrationSelectAccountUrl() {
+  const marker = document.querySelector("script[data-component='header'][data-initialstate]");
+  const raw = marker?.getAttribute("data-initialstate");
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw);
+    const webLink = parsed?.header?.mainNavigation?.selectAccount?.webLink;
+    return typeof webLink === "string" && webLink ? webLink : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getCycleState(config) {
   const defaults = {
     index: 0,
@@ -265,6 +279,12 @@ function findAccountSwitchClickableByEmail(email) {
 
 async function navigateToAccountSwitcher(config) {
   await setCycleState(config, { phase: "opening-switcher" });
+  const hydratedUrl = getHeaderHydrationSelectAccountUrl();
+  if (hydratedUrl) {
+    location.href = hydratedUrl;
+    return true;
+  }
+
   if (await ensureHeaderMenuOpen()) {
     const link = findSelectAccountLink();
     if (link) {
