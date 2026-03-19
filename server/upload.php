@@ -25,6 +25,17 @@ function request_string(string $key): string
     return is_string($value) ? trim($value) : '';
 }
 
+function request_json_body(): array
+{
+    $raw = file_get_contents('php://input');
+    if (!is_string($raw) || trim($raw) === '') {
+        return [];
+    }
+
+    $data = json_decode($raw, true);
+    return is_array($data) ? $data : [];
+}
+
 function request_param_string(string $key): string
 {
     $value = $_REQUEST[$key] ?? '';
@@ -120,6 +131,46 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(405, [
         'ok' => false,
         'error' => 'Povolena je pouze metoda POST.',
+    ]);
+}
+
+$jsonBody = request_json_body();
+$action = is_string($jsonBody['action'] ?? null) ? trim($jsonBody['action']) : '';
+if ($action === 'check-bulk') {
+    $items = is_array($jsonBody['items'] ?? null) ? $jsonBody['items'] : [];
+    $results = [];
+
+    foreach ($items as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+
+        $invoiceNo = sanitize_digits((string) ($item['invoiceNo'] ?? ''));
+        $orderNo = sanitize_digits((string) ($item['orderNo'] ?? ''));
+        if ($invoiceNo === '' || $orderNo === '') {
+            continue;
+        }
+
+        $pdfPath = find_existing_relative_path($baseDir, $orderNo, $invoiceNo, 'pdf');
+        $isdocPath = find_existing_relative_path($baseDir, $orderNo, $invoiceNo, 'isdoc');
+
+        $results[$invoiceNo] = [
+            'invoiceNo' => $invoiceNo,
+            'orderNo' => $orderNo,
+            'pdf' => [
+                'exists' => $pdfPath !== null,
+                'path' => $pdfPath,
+            ],
+            'isdoc' => [
+                'exists' => $isdocPath !== null,
+                'path' => $isdocPath,
+            ],
+        ];
+    }
+
+    respond(200, [
+        'ok' => true,
+        'results' => $results,
     ]);
 }
 

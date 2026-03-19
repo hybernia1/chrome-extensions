@@ -12,7 +12,7 @@
     if (typeof url !== "string" || !url) return false;
     const lower = url.toLowerCase();
     if (mode === "pdf") return lower.includes("pdf.alza.cz") || lower.includes(".pdf");
-    return lower.includes("/attachment/") || lower.includes(".isdoc");
+    return lower.includes("/attachment/") || lower.includes(".isdoc") || lower.startsWith("blob:");
   }
 
   function findDownloadUrlInValue(value, mode) {
@@ -57,6 +57,16 @@
     return disposition.includes(".isdoc") || disposition.includes(".isdocx") || contentType.includes("xml") || contentType.includes("octet-stream");
   }
 
+  async function resolveBlobUrl(url, mode) {
+    const response = await fetch(url);
+    const blob = await response.blob();
+    return {
+      url,
+      dataUrl: blob.size > 0 ? await blobToDataUrl(blob) : null,
+      filename: mode === "isdoc" ? "download.isdoc" : "download.pdf"
+    };
+  }
+
   window.addEventListener("ALZA_PAGE_CAPTURE_DOWNLOAD_URL", (event) => {
     const { requestId, mode, timeoutMs } = event.detail || {};
     const originalFetch = window.fetch;
@@ -98,13 +108,25 @@
     };
 
     window.open = function(url, ...rest) {
-      if (matchesDownloadUrl(url, mode)) finish({ url });
+      if (matchesDownloadUrl(url, mode)) {
+        if (mode === "isdoc" && typeof url === "string" && url.startsWith("blob:")) {
+          resolveBlobUrl(url, mode).then(finish).catch(() => finish({ url }));
+        } else {
+          finish({ url });
+        }
+      }
       return originalOpen.call(this, url, ...rest);
     };
 
     HTMLAnchorElement.prototype.click = function(...args) {
       try {
-        if (matchesDownloadUrl(this.href, mode)) finish({ url: this.href });
+        if (matchesDownloadUrl(this.href, mode)) {
+          if (mode === "isdoc" && this.href.startsWith("blob:")) {
+            resolveBlobUrl(this.href, mode).then(finish).catch(() => finish({ url: this.href }));
+          } else {
+            finish({ url: this.href });
+          }
+        }
       } catch {}
       return originalAnchorClick.apply(this, args);
     };

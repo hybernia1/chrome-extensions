@@ -94,18 +94,41 @@ function dataUrlToBlob(dataUrl) {
 }
 
 async function hydrateServerState(rows) {
-  for (const row of rows) {
-    const [pdfCheck, isdocCheck] = await Promise.all([
-      checkServerArtifact(row, "pdf").catch(() => null),
-      checkServerArtifact(row, "isdoc").catch(() => null)
-    ]);
+  if (!rows.length) return;
 
+  const response = await fetch(UPLOAD_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "check-bulk",
+      items: rows.map((row) => ({
+        invoiceNo: row.invoiceNo,
+        orderNo: row.orderNo
+      }))
+    })
+  });
+
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(data?.error || `Bulk kontrola existence vrátila HTTP ${response.status}`);
+  }
+
+  const results = data?.results || {};
+  for (const row of rows) {
+    const rec = results[row.invoiceNo] || {};
     await updateDone(row.invoiceNo, {
       orderNo: row.orderNo,
-      pdf: !!pdfCheck?.exists,
-      isdoc: !!isdocCheck?.exists,
-      pdfServerPath: pdfCheck?.path || null,
-      isdocServerPath: isdocCheck?.path || null,
+      pdf: !!rec?.pdf?.exists,
+      isdoc: !!rec?.isdoc?.exists,
+      pdfServerPath: rec?.pdf?.path || null,
+      isdocServerPath: rec?.isdoc?.path || null,
       lastError: null
     });
   }
@@ -622,15 +645,18 @@ async function startNextIfIdle() {
 
 async function buildQueueFromRows(rows, mode) {
   const queue = [];
+  const st = await getState();
 
   for (const row of rows) {
     const tasks = expandTaskByMode(row.invoiceNo, mode, 0);
     for (const task of tasks) {
-      const serverCheck = await checkServerArtifact(row, task.mode).catch(() => null);
-      if (serverCheck?.exists) {
-        await updateDone(row.invoiceNo, task.mode === "pdf"
-          ? { orderNo: row.orderNo, pdf: true, pdfServerPath: serverCheck.path, lastError: null }
-          : { orderNo: row.orderNo, isdoc: true, isdocServerPath: serverCheck.path, lastError: null });
+      const rec = st.done[row.invoiceNo] || {};
+      if (task.mode === "pdf" && rec.pdfServerPath) {
+        await updateDone(row.invoiceNo, { orderNo: row.orderNo, pdf: true, pdfServerPath: rec.pdfServerPath, lastError: null });
+        continue;
+      }
+      if (task.mode === "isdoc" && rec.isdocServerPath) {
+        await updateDone(row.invoiceNo, { orderNo: row.orderNo, isdoc: true, isdocServerPath: rec.isdocServerPath, lastError: null });
         continue;
       }
       queue.push(task);
@@ -649,7 +675,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       const st = await getState();
       await setState({ tabId, windowId, rows: msg.rows || st.rows || [] });
-      await hydrateServerState(msg.rows || st.rows || []);
+      await hydrateServerState(msg.rows || st.rows || []).catch(async (error) => {
+        await setStatus(error?.message || "Nepodařilo se načíst stav ze serveru.");
+      });
       await pushStateToUI();
       return sendResponse({ ok: true });
     }

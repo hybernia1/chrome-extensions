@@ -7,6 +7,7 @@ Deploy this file to `http://10.3.109.33/faktury/alza/upload.php` so that the ext
 
 Expected behavior:
 - `GET ?invoiceNo=...&orderNo=...&type=pdf|isdoc` returns whether the file already exists on the server
+- `POST {"action":"check-bulk","items":[{"invoiceNo":"...","orderNo":"..."}]}` returns existence for many invoices in one request
 - `POST` multipart/form-data with `invoiceNo`, `orderNo`, `type`, `source`, `sourceUrl`, and `file`
 - saves PDFs under `invoice/<orderNo>/<invoiceNo>.pdf`
 - saves ISDOC files under `isdoc/<orderNo>/<invoiceNo>.(isdoc|isdocx)`
