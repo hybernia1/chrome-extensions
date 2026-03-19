@@ -156,6 +156,31 @@ async function enrichRowFromPage(row) {
   return nextRow;
 }
 
+async function storeResolvedRowOptions(invoiceNo, result) {
+  const st = await getState();
+  const row = (st.rows || []).find((item) => item.invoiceNo === invoiceNo);
+  if (!row) throw new Error(`Řádek ${invoiceNo} nebyl nalezen.`);
+
+  const nextRow = {
+    ...row,
+    pdfUrl: result?.pdfUrl || row.pdfUrl || null,
+    isdocOptionsUrl: result?.isdocOptionsUrl || row.isdocOptionsUrl || null,
+    documentId: result?.documentId || row.documentId || null
+  };
+
+  const nextRows = st.rows.map((item) => item.invoiceNo === invoiceNo ? nextRow : item);
+  await setState({ rows: nextRows });
+  await updateDone(invoiceNo, {
+    orderNo: nextRow.orderNo,
+    pdfUrl: nextRow.pdfUrl,
+    isdocOptionsUrl: nextRow.isdocOptionsUrl,
+    documentId: nextRow.documentId,
+    lastError: null
+  });
+  await pushStateToUI();
+  return nextRow;
+}
+
 function isTaskDoneForMode(rec, mode) {
   if (!rec) return false;
   if (mode === "pdf") return !!rec.pdf;
@@ -550,6 +575,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "ALZA_GET_STATE") {
       const st = await getState();
       return sendResponse({ ok: true, state: st });
+    }
+
+    if (msg.type === "ALZA_STORE_ROW_OPTIONS") {
+      try {
+        const row = await storeResolvedRowOptions(msg.invoiceNo, msg.result || {});
+        return sendResponse({ ok: true, row });
+      } catch (error) {
+        return sendResponse({ ok: false, error: error?.message || "Nepodařilo se uložit options metadata." });
+      }
     }
 
     if (msg.type === "ALZA_START_ALL") {

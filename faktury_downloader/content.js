@@ -2,6 +2,7 @@ const digits = (s) => (s || "").replace(/[^\d]/g, "");
 
 const pageResolvers = new Map();
 let pageRequestSeq = 0;
+let armedManualInvoice = null;
 
 let sidebarEl = null;
 
@@ -290,14 +291,7 @@ function getReactFiber(node) {
         };
       }
 
-      async function runResolveOptions(detail) {
-        const { requestId, invoiceNo } = detail || {};
-        const row = findDocumentRowByInvoice(invoiceNo);
-        if (!row) {
-          emit({ requestId, ok: false, error: 'Řádek dokumentu nebyl nalezen.' });
-          return;
-        }
-
+      function withOptionsCapture(requestId, worker, timeoutMs = 7000, timeoutMessage = 'Options endpoint se neodchytil.') {
         const originalFetch = window.fetch;
         const originalOpen = XMLHttpRequest.prototype.open;
         const originalSend = XMLHttpRequest.prototype.send;
@@ -326,7 +320,6 @@ function getReactFiber(node) {
         };
 
         XMLHttpRequest.prototype.open = function(...args) {
-          this.__alzaUrl = args[1];
           return originalOpen.apply(this, args);
         };
 
@@ -340,8 +333,8 @@ function getReactFiber(node) {
         };
 
         try {
-          clickInvoiceInDocumentRow(row);
-          setTimeout(() => finish({ ok: false, error: 'Options endpoint se neodchytil po otevření modalu.' }), 7000);
+          worker({ finish });
+          setTimeout(() => finish({ ok: false, error: timeoutMessage }), timeoutMs);
         } catch (error) {
           finish({ ok: false, error: error?.message || 'Vyvolání options selhalo.' });
         } finally {
@@ -349,8 +342,21 @@ function getReactFiber(node) {
             window.fetch = originalFetch;
             XMLHttpRequest.prototype.open = originalOpen;
             XMLHttpRequest.prototype.send = originalSend;
-          }, 7500);
+          }, timeoutMs + 500);
         }
+      }
+
+      async function runResolveOptions(detail) {
+        const { requestId, invoiceNo } = detail || {};
+        const row = findDocumentRowByInvoice(invoiceNo);
+        if (!row) {
+          emit({ requestId, ok: false, error: 'Řádek dokumentu nebyl nalezen.' });
+          return;
+        }
+
+        withOptionsCapture(requestId, () => {
+          clickInvoiceInDocumentRow(row);
+        }, 7000, 'Options endpoint se neodchytil po otevření modalu.');
       }
 
       async function runIsdoc(detail) {
@@ -415,8 +421,17 @@ function getReactFiber(node) {
         runIsdoc(event.detail);
       });
 
+      function armManualOptionsCapture(detail) {
+        const { requestId } = detail || {};
+        withOptionsCapture(requestId, () => {}, 15000, 'Manuální otevření modalu nevyvolalo options endpoint.');
+      }
+
       window.addEventListener('ALZA_PAGE_RESOLVE_OPTIONS', (event) => {
         runResolveOptions(event.detail);
+      });
+
+      window.addEventListener('ALZA_PAGE_ARM_OPTIONS_CAPTURE', (event) => {
+        armManualOptionsCapture(event.detail);
       });
     })();
   `;
@@ -441,6 +456,30 @@ function resolveOptionsViaPage(invoiceNo) {
     });
 
     window.dispatchEvent(new CustomEvent('ALZA_PAGE_RESOLVE_OPTIONS', {
+      detail: { requestId, invoiceNo }
+    }));
+  });
+}
+
+function armManualOptionsCapture(invoiceNo) {
+  return new Promise((resolve, reject) => {
+    const requestId = `manual-options-${Date.now()}-${++pageRequestSeq}`;
+    const timer = setTimeout(() => {
+      pageResolvers.delete(requestId);
+      armedManualInvoice = null;
+      reject(new Error('Manual options capture timeout.'));
+    }, 15000);
+
+    pageResolvers.set(requestId, (result) => {
+      clearTimeout(timer);
+      pageResolvers.delete(requestId);
+      armedManualInvoice = null;
+      if (result?.ok) resolve(result);
+      else reject(new Error(result?.error || 'Manuální options capture selhal.'));
+    });
+
+    armedManualInvoice = invoiceNo;
+    window.dispatchEvent(new CustomEvent('ALZA_PAGE_ARM_OPTIONS_CAPTURE', {
       detail: { requestId, invoiceNo }
     }));
   });
@@ -601,7 +640,8 @@ function renderList(state) {
       ISDOC server: ${rec?.isdocServerPath || '-'}<br>
       PDF URL: ${row.pdfUrl ? 'ANO' : 'NE'}<br>
       ISDOC options: ${row.isdocOptionsUrl ? 'ANO' : 'NE'}<br>
-      documentId: ${row.documentId || '-'}
+      documentId: ${row.documentId || '-'}<br>
+      Manual capture: ${armedManualInvoice === row.invoiceNo ? 'ČEKÁ NA KLIK' : '-'}
     `;
 
     return `
@@ -617,6 +657,7 @@ function renderList(state) {
           <button data-act="retryPdf" data-inv="${row.invoiceNo}">Retry PDF</button>
           <button data-act="retryIsdoc" data-inv="${row.invoiceNo}">Retry ISDOC</button>
           <button data-act="retryBoth" data-inv="${row.invoiceNo}">Retry obojí</button>
+          <button data-act="manualOptions" data-inv="${row.invoiceNo}">Manual modal</button>
           <button data-act="scroll" data-inv="${row.invoiceNo}">Scroll</button>
         </div>
         <div class="alzaSbRowMeta">${serverPaths}</div>
@@ -634,6 +675,21 @@ function renderList(state) {
       if (act === 'retryPdf') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'pdf' });
       if (act === 'retryIsdoc') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'isdoc' });
       if (act === 'retryBoth') await chrome.runtime.sendMessage({ type: 'ALZA_RETRY', invoiceNo: inv, mode: 'both' });
+      if (act === 'manualOptions') {
+        setStatusText(`Manual capture armed for ${inv}. Klikněte ručně na fakturu v tabulce Alza.`);
+        const rowEl = findRowElementByInvoice(inv);
+        if (rowEl) rowEl.scrollIntoView({ block: 'center', inline: 'nearest' });
+        armManualOptionsCapture(inv)
+          .then(async (result) => {
+            await chrome.runtime.sendMessage({ type: 'ALZA_STORE_ROW_OPTIONS', invoiceNo: inv, result });
+            setStatusText(`Manual options captured for ${inv}.`);
+            const response = await chrome.runtime.sendMessage({ type: 'ALZA_GET_STATE' });
+            if (response?.ok) renderList(response.state);
+          })
+          .catch((error) => {
+            setStatusText(error?.message || `Manual options capture failed for ${inv}.`);
+          });
+      }
       if (act === 'scroll') {
         const rowEl = findRowElementByInvoice(inv);
         if (rowEl) rowEl.scrollIntoView({ block: 'center', inline: 'nearest' });
