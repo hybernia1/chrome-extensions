@@ -58,11 +58,15 @@ async function getStoredCycleState(config) {
     const state = stored?.[ACCOUNT_CYCLE_STATE_KEY];
     if (!state || typeof state !== "object") return null;
     const index = Number.isInteger(state.index) ? state.index : 0;
+    const completedAccounts = Array.isArray(state.completedAccounts)
+      ? state.completedAccounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+      : [];
     return {
       index: ((index % config.accounts.length) + config.accounts.length) % config.accounts.length,
       phase: typeof state.phase === "string" ? state.phase : "ensure-account",
       waitUntil: Number.isFinite(state.waitUntil) ? state.waitUntil : 0,
-      lastQueueIdleAt: Number.isFinite(state.lastQueueIdleAt) ? state.lastQueueIdleAt : 0
+      lastQueueIdleAt: Number.isFinite(state.lastQueueIdleAt) ? state.lastQueueIdleAt : 0,
+      completedAccounts
     };
   } catch {
     return null;
@@ -184,7 +188,8 @@ async function getCycleState(config) {
     index: 0,
     phase: "ensure-account",
     waitUntil: 0,
-    lastQueueIdleAt: 0
+    lastQueueIdleAt: 0,
+    completedAccounts: []
   };
 
   try {
@@ -227,7 +232,36 @@ async function advanceCycleIndex(config) {
     index: nextIndex,
     phase: "ensure-account",
     waitUntil: Date.now() + (wrapped ? config.pauseMs : 0),
-    lastQueueIdleAt: 0
+    lastQueueIdleAt: 0,
+    completedAccounts: wrapped ? [] : current.completedAccounts || []
+  });
+}
+
+async function completeCurrentAccountAndAdvance(config, currentEmail) {
+  const normalizedCurrent = String(currentEmail || "").trim().toLowerCase();
+  const current = await getCycleState(config);
+  const completedAccounts = Array.from(new Set([
+    ...(current.completedAccounts || []),
+    normalizedCurrent
+  ].filter(Boolean)));
+  const nextIndex = config.accounts.findIndex((email) => !completedAccounts.includes(email));
+
+  if (nextIndex >= 0) {
+    return await setCycleState(config, {
+      index: nextIndex,
+      phase: "ensure-account",
+      waitUntil: 0,
+      lastQueueIdleAt: 0,
+      completedAccounts
+    });
+  }
+
+  return await setCycleState(config, {
+    index: 0,
+    phase: "ensure-account",
+    waitUntil: Date.now() + config.pauseMs,
+    lastQueueIdleAt: 0,
+    completedAccounts: []
   });
 }
 
@@ -924,7 +958,7 @@ async function handleAccountCycleTick() {
         return;
       }
 
-      const next = await advanceCycleIndex(config);
+      const next = await completeCurrentAccountAndAdvance(config, targetEmail);
       const nextEmail = config.accounts[next.index];
       if (next.waitUntil && next.waitUntil > Date.now()) {
         setStatusText(`Účet ${targetEmail}: hotovo. Další kolo proběhne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
