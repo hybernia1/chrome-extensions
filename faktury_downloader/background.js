@@ -499,6 +499,13 @@ async function startNextIfIdle() {
         continue;
       }
 
+      if (nextTask.mode === "pdf" && execAck.pdfDownloadUrl) {
+        await updateDone(row.invoiceNo, { pdfDownloadUrl: execAck.pdfDownloadUrl });
+      }
+      if (nextTask.mode === "isdoc" && execAck.isdocDownloadUrl) {
+        await updateDone(row.invoiceNo, { isdocDownloadUrl: execAck.isdocDownloadUrl });
+      }
+
       const pollResult = await pollForCompletion(active, DOWNLOAD_TIMEOUT_MS);
       const st2 = await getState();
       if (!st2.running) return;
@@ -652,7 +659,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "ALZA_RUN_ROW_RESULT") {
       const st = await getState();
       if (!st.active || st.active.runId !== msg.runId) return sendResponse({ ok: false });
-      resolveExecAck(msg.runId, { ok: !!msg.ok, error: msg.error || null });
+      resolveExecAck(msg.runId, {
+        ok: !!msg.ok,
+        error: msg.error || null,
+        pdfDownloadUrl: msg.pdfDownloadUrl || null,
+        isdocDownloadUrl: msg.isdocDownloadUrl || null
+      });
       return sendResponse({ ok: true });
     }
 

@@ -77,22 +77,115 @@ async function closeFormatModal(modal) {
   await sleep(250);
 }
 
+function matchesDownloadUrl(url, mode) {
+  if (typeof url !== "string" || !url) return false;
+  const lower = url.toLowerCase();
+  if (mode === "pdf") return lower.includes("pdf.alza.cz") || lower.includes(".pdf");
+  return lower.includes("/attachment/") || lower.includes(".isdoc");
+}
+
+function findDownloadUrlInValue(value, mode) {
+  if (!value) return null;
+  if (typeof value === "string") return matchesDownloadUrl(value, mode) ? value : null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findDownloadUrlInValue(item, mode);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value === "object") {
+    for (const nested of Object.values(value)) {
+      const found = findDownloadUrlInValue(nested, mode);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+async function captureDownloadUrl(mode, trigger, timeoutMs = 4000) {
+  const originalFetch = window.fetch;
+  const originalOpen = window.open;
+  const originalAnchorClick = HTMLAnchorElement.prototype.click;
+  const originalXhrOpen = XMLHttpRequest.prototype.open;
+  const originalXhrSend = XMLHttpRequest.prototype.send;
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    const finish = (url) => {
+      if (settled) return;
+      settled = true;
+      window.fetch = originalFetch;
+      window.open = originalOpen;
+      HTMLAnchorElement.prototype.click = originalAnchorClick;
+      XMLHttpRequest.prototype.open = originalXhrOpen;
+      XMLHttpRequest.prototype.send = originalXhrSend;
+      resolve(url || null);
+    };
+
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      try {
+        const clone = response.clone();
+        const text = await clone.text();
+        finish(matchesDownloadUrl(response.url, mode) ? response.url : findDownloadUrlInValue(text, mode));
+      } catch {}
+      return response;
+    };
+
+    window.open = function(url, ...rest) {
+      if (matchesDownloadUrl(url, mode)) finish(url);
+      return originalOpen.call(this, url, ...rest);
+    };
+
+    HTMLAnchorElement.prototype.click = function(...args) {
+      try {
+        if (matchesDownloadUrl(this.href, mode)) finish(this.href);
+      } catch {}
+      return originalAnchorClick.apply(this, args);
+    };
+
+    XMLHttpRequest.prototype.open = function(...args) {
+      this.__alzaMode = mode;
+      return originalXhrOpen.apply(this, args);
+    };
+
+    XMLHttpRequest.prototype.send = function(...args) {
+      this.addEventListener("load", function() {
+        try {
+          finish(findDownloadUrlInValue(this.responseText, mode));
+        } catch {}
+      }, { once: true });
+      return originalXhrSend.apply(this, args);
+    };
+
+    Promise.resolve()
+      .then(() => trigger())
+      .catch(() => finish(null));
+
+    setTimeout(() => finish(null), timeoutMs);
+  });
+}
+
 async function clickDownloads(modal, mode) {
   const pdfBtn = findButtonByExactText(modal, "PDF");
   const isdocBtn = findButtonByExactText(modal, "ISDOC");
   if (!pdfBtn || !isdocBtn) throw new Error("Nenalezeno PDF/ISDOC tlačítko.");
+  const result = { pdfDownloadUrl: null, isdocDownloadUrl: null };
 
   if (mode === "pdf" || mode === "both") {
-    pdfBtn.click();
+    result.pdfDownloadUrl = await captureDownloadUrl("pdf", () => pdfBtn.click());
     await sleep(250);
     await closeDownloadStartedModal(await waitForDownloadStartedModal(8000));
   }
 
   if (mode === "isdoc" || mode === "both") {
-    isdocBtn.click();
+    result.isdocDownloadUrl = await captureDownloadUrl("isdoc", () => isdocBtn.click());
     await sleep(250);
     await closeDownloadStartedModal(await waitForDownloadStartedModal(8000));
   }
+
+  return result;
 }
 
 function restoreScroll(savedY, tr) {
@@ -312,12 +405,12 @@ chrome.runtime.onMessage.addListener((msg) => {
       clickInvoiceInTr(tr);
       const modal = await waitForFormatModal(15000);
 
-      await clickDownloads(modal, mode);
+      const downloadInfo = await clickDownloads(modal, mode);
       await closeFormatModal(modal);
 
       await sleep(100);
       restoreScroll(savedY, tr);
-      await chrome.runtime.sendMessage({ type: "ALZA_RUN_ROW_RESULT", runId, ok: true });
+      await chrome.runtime.sendMessage({ type: "ALZA_RUN_ROW_RESULT", runId, ok: true, ...downloadInfo });
     })().catch(async (err) => {
       await chrome.runtime.sendMessage({
         type: "ALZA_RUN_ROW_RESULT",
