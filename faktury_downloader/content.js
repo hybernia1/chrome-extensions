@@ -13,6 +13,66 @@ const ACCOUNT_CYCLE_STATE_KEY = "alzaAccountCycleStateV1";
 const ACCOUNT_CYCLE_CONFIG_KEY = "alzaAccountCycleConfigV1";
 const ALZA_DOCUMENTS_ORIGIN = "https://www.alza.cz";
 
+function normalizeAccountRecord(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return {
+      sessionId: String(value.sessionId || "").trim().toLowerCase(),
+      email: String(value.email || "").trim().toLowerCase(),
+      name: String(value.name || "").trim()
+    };
+  }
+  return {
+    sessionId: "",
+    email: String(value || "").trim().toLowerCase(),
+    name: ""
+  };
+}
+
+function normalizeAccountRecordList(values = []) {
+  return values
+    .map((value) => normalizeAccountRecord(value))
+    .filter((account) => account.email || account.sessionId);
+}
+
+function getAccountKey(account) {
+  const normalized = normalizeAccountRecord(account);
+  return normalized.sessionId || normalized.email;
+}
+
+function getAccountEmail(account) {
+  return normalizeAccountRecord(account).email;
+}
+
+function getAccountLabel(account) {
+  const normalized = normalizeAccountRecord(account);
+  return normalized.email || normalized.name || normalized.sessionId;
+}
+
+function mergeAccountRecords(existingAccounts = [], discoveredAccounts = []) {
+  const merged = [];
+  const byKey = new Map();
+
+  for (const rawAccount of [...existingAccounts, ...discoveredAccounts]) {
+    const account = normalizeAccountRecord(rawAccount);
+    const key = getAccountKey(account);
+    if (!key) continue;
+
+    if (!byKey.has(key)) {
+      const copy = { ...account };
+      byKey.set(key, copy);
+      merged.push(copy);
+      continue;
+    }
+
+    const current = byKey.get(key);
+    if (!current.sessionId && account.sessionId) current.sessionId = account.sessionId;
+    if (!current.email && account.email) current.email = account.email;
+    if (!current.name && account.name) current.name = account.name;
+  }
+
+  return merged;
+}
+
 function getAutoStartMode() {
   const params = new URLSearchParams(location.search);
   const enabled = params.get("alzaAutoStart");
@@ -28,7 +88,7 @@ async function getStoredAccountCycleConfig() {
     const stored = await chrome.storage.local.get(ACCOUNT_CYCLE_CONFIG_KEY);
     const config = stored?.[ACCOUNT_CYCLE_CONFIG_KEY];
     if (!config || !Array.isArray(config.accounts) || !config.accounts.length) return null;
-    const accounts = config.accounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+    const accounts = normalizeAccountRecordList(config.accounts);
     if (!accounts.length) return null;
     const pauseMs = Number.isFinite(config.pauseMs) && config.pauseMs > 0 ? config.pauseMs : 30 * 60 * 1000;
     return { accounts, pauseMs };
@@ -45,7 +105,7 @@ async function persistAccountCycleConfig(config) {
     }
     await chrome.storage.local.set({
       [ACCOUNT_CYCLE_CONFIG_KEY]: {
-        accounts: config.accounts,
+        accounts: normalizeAccountRecordList(config.accounts),
         pauseMs: config.pauseMs
       }
     });
@@ -88,13 +148,6 @@ function getAutoRefreshIntervalMs() {
   return minutes * 60 * 1000;
 }
 
-function mergeAccountEmailLists(existingAccounts = [], discoveredAccounts = []) {
-  return Array.from(new Set([
-    ...existingAccounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
-    ...discoveredAccounts.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
-  ]));
-}
-
 async function getAccountCycleConfig() {
   const params = new URLSearchParams(location.search);
   const paramAccounts = (params.get("alzaAccounts") || "")
@@ -106,7 +159,7 @@ async function getAccountCycleConfig() {
   if (paramAccounts.length) {
     const rawPause = Number.parseInt(params.get("alzaCyclePauseMinutes") || "30", 10);
     const pauseMinutes = Number.isFinite(rawPause) && rawPause > 0 ? rawPause : 30;
-    const accounts = mergeAccountEmailLists(storedConfig?.accounts || [], paramAccounts);
+    const accounts = mergeAccountRecords(storedConfig?.accounts || [], paramAccounts);
     const config = {
       accounts,
       pauseMs: pauseMinutes * 60 * 1000
@@ -115,7 +168,7 @@ async function getAccountCycleConfig() {
       !storedConfig ||
       storedConfig.pauseMs !== config.pauseMs ||
       storedConfig.accounts.length !== config.accounts.length ||
-      storedConfig.accounts.some((email, index) => email !== config.accounts[index])
+      storedConfig.accounts.some((account, index) => getAccountKey(account) !== getAccountKey(config.accounts[index]))
     ) {
       await persistAccountCycleConfig(config);
     }
@@ -147,7 +200,7 @@ function buildDocumentsUrlForCycle(config = null) {
   url.searchParams.set("alzaAutoStart", "1");
   url.searchParams.set("alzaAutoMode", "both");
   if (config?.accounts?.length) {
-    url.searchParams.set("alzaAccounts", config.accounts.join(","));
+    url.searchParams.set("alzaAccounts", config.accounts.map((account) => getAccountEmail(account)).filter(Boolean).join(","));
     url.searchParams.set("alzaCyclePauseMinutes", String(Math.max(Math.round(config.pauseMs / 60000), 1)));
   }
   return url.toString();
@@ -221,7 +274,12 @@ async function setCycleState(config, patch) {
 
 async function getTargetAccountEmail(config) {
   const state = await getCycleState(config);
-  return config.accounts[state.index] || config.accounts[0];
+  return getAccountEmail(config.accounts[state.index] || config.accounts[0]);
+}
+
+async function getTargetAccount(config) {
+  const state = await getCycleState(config);
+  return normalizeAccountRecord(config.accounts[state.index] || config.accounts[0]);
 }
 
 async function advanceCycleIndex(config) {
@@ -237,14 +295,14 @@ async function advanceCycleIndex(config) {
   });
 }
 
-async function completeCurrentAccountAndAdvance(config, currentEmail) {
-  const normalizedCurrent = String(currentEmail || "").trim().toLowerCase();
+async function completeCurrentAccountAndAdvance(config, currentAccount) {
+  const normalizedCurrent = getAccountKey(currentAccount);
   const current = await getCycleState(config);
   const completedAccounts = Array.from(new Set([
     ...(current.completedAccounts || []),
     normalizedCurrent
   ].filter(Boolean)));
-  const nextIndex = config.accounts.findIndex((email) => !completedAccounts.includes(email));
+  const nextIndex = config.accounts.findIndex((account) => !completedAccounts.includes(getAccountKey(account)));
 
   if (nextIndex >= 0) {
     return await setCycleState(config, {
@@ -298,13 +356,26 @@ function getAccountSwitcherBoxes() {
   return Array.from(document.querySelectorAll(".account-box[data-sessionid], a .account-box, .account-box.active"));
 }
 
-function getAccountEmailsFromSwitcher() {
+function getAccountBoxSessionId(box) {
+  return String(box?.getAttribute?.("data-sessionid") || "").trim().toLowerCase();
+}
+
+function getAccountBoxName(box) {
+  return (box?.querySelector(".user-info--name")?.textContent || "").trim();
+}
+
+function getAccountRecordsFromSwitcher() {
   const seen = new Set();
   return getAccountSwitcherBoxes()
-    .map((box) => getAccountBoxEmail(box))
-    .filter((email) => {
-      if (!email || seen.has(email)) return false;
-      seen.add(email);
+    .map((box) => ({
+      sessionId: getAccountBoxSessionId(box),
+      email: getAccountBoxEmail(box),
+      name: getAccountBoxName(box)
+    }))
+    .filter((account) => {
+      const key = getAccountKey(account);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
 }
@@ -322,25 +393,30 @@ function getActiveAccountBox() {
   return document.querySelector(".account-box.active") || null;
 }
 
-function findAccountSwitchClickableByEmail(email) {
-  const normalized = (email || "").trim().toLowerCase();
-  if (!normalized) return null;
+function findAccountSwitchClickable(account) {
+  const normalized = normalizeAccountRecord(account);
+  const key = getAccountKey(normalized);
+  if (!key) return null;
 
   const boxes = getAccountSwitcherBoxes();
-  const matchedBox = boxes.find((box) => getAccountBoxEmail(box) === normalized);
+  const matchedBox = boxes.find((box) => {
+    const boxSessionId = getAccountBoxSessionId(box);
+    if (normalized.sessionId && boxSessionId === normalized.sessionId) return true;
+    return getAccountBoxEmail(box) === normalized.email;
+  });
   if (matchedBox) return matchedBox.closest("a") || matchedBox;
 
   const partialBox = boxes.find((box) => {
     const text = (box.textContent || "").trim().toLowerCase();
-    return text.includes(normalized);
+    return normalized.email && text.includes(normalized.email);
   });
   if (partialBox) return partialBox.closest("a") || partialBox;
 
   const containers = Array.from(document.querySelectorAll("main, [role='dialog'], body"));
   for (const container of containers) {
     const nodes = Array.from(container.querySelectorAll("a, button, [role='button'], div, span"));
-    const exact = nodes.find((node) => (node.textContent || "").trim().toLowerCase() === normalized);
-    const partial = nodes.find((node) => (node.textContent || "").trim().toLowerCase().includes(normalized));
+    const exact = nodes.find((node) => normalized.email && (node.textContent || "").trim().toLowerCase() === normalized.email);
+    const partial = nodes.find((node) => normalized.email && (node.textContent || "").trim().toLowerCase().includes(normalized.email));
     const candidate = exact || partial;
     if (candidate) return candidate.closest("a, button, [role='button'], .account-box") || candidate;
   }
@@ -360,27 +436,33 @@ function getNextNonActiveAccountBox() {
   );
 }
 
-function isTargetAccountAlreadyActive(email) {
-  const normalized = (email || "").trim().toLowerCase();
-  if (!normalized) return false;
-  return getAccountBoxEmail(getActiveAccountBox()) === normalized;
+function isTargetAccountAlreadyActive(account) {
+  const normalized = normalizeAccountRecord(account);
+  const activeBox = getActiveAccountBox();
+  if (!activeBox) return false;
+  if (normalized.sessionId && getAccountBoxSessionId(activeBox) === normalized.sessionId) return true;
+  return !!normalized.email && getAccountBoxEmail(activeBox) === normalized.email;
 }
 
 async function syncCycleConfigWithSwitcherAccounts(config) {
   if (!config) return config;
 
-  const discoveredAccounts = getAccountEmailsFromSwitcher();
+  const discoveredAccounts = getAccountRecordsFromSwitcher();
   if (!discoveredAccounts.length) return config;
 
-  const currentAccounts = Array.isArray(config.accounts) ? config.accounts : [];
-  const mergedAccounts = mergeAccountEmailLists(currentAccounts, discoveredAccounts);
+  const currentAccounts = normalizeAccountRecordList(Array.isArray(config.accounts) ? config.accounts : []);
+  const mergedAccounts = mergeAccountRecords(currentAccounts, discoveredAccounts);
   const changed = (
     mergedAccounts.length !== currentAccounts.length ||
-    mergedAccounts.some((email, index) => email !== currentAccounts[index])
+    mergedAccounts.some((account, index) => getAccountKey(account) !== getAccountKey(currentAccounts[index]))
   );
   if (!changed) return config;
 
-  const activeEmail = getAccountBoxEmail(getActiveAccountBox());
+  const activeAccount = normalizeAccountRecord({
+    sessionId: getAccountBoxSessionId(getActiveAccountBox()),
+    email: getAccountBoxEmail(getActiveAccountBox()),
+    name: getAccountBoxName(getActiveAccountBox())
+  });
   const nextConfig = {
     ...config,
     accounts: mergedAccounts
@@ -389,10 +471,12 @@ async function syncCycleConfigWithSwitcherAccounts(config) {
   await persistAccountCycleConfig(nextConfig);
 
   const currentState = await getCycleState(nextConfig);
-  const nextIndex = currentAccounts[currentState.index]
-    ? mergedAccounts.indexOf(currentAccounts[currentState.index])
+  const currentTargetKey = getAccountKey(currentAccounts[currentState.index]);
+  const nextIndex = currentTargetKey
+    ? mergedAccounts.findIndex((account) => getAccountKey(account) === currentTargetKey)
     : -1;
-  const fallbackIndex = activeEmail ? mergedAccounts.indexOf(activeEmail) : -1;
+  const activeKey = getAccountKey(activeAccount);
+  const fallbackIndex = activeKey ? mergedAccounts.findIndex((account) => getAccountKey(account) === activeKey) : -1;
   await setCycleState(nextConfig, {
     index: nextIndex >= 0 ? nextIndex : Math.max(fallbackIndex, 0)
   });
@@ -425,14 +509,17 @@ async function selectTargetAccount(config = null) {
     config = await syncCycleConfigWithSwitcherAccounts(config);
   }
   const start = Date.now();
-  let targetEmail = config ? await getTargetAccountEmail(config) : "";
+  let targetAccount = config ? await getTargetAccount(config) : null;
   while (Date.now() - start < 15000) {
-    if (targetEmail && isTargetAccountAlreadyActive(targetEmail) && config?.accounts?.length > 1) {
-      const activeEmail = getAccountBoxEmail(getActiveAccountBox());
-      const activeIndex = config.accounts.indexOf(activeEmail);
+    if (targetAccount && isTargetAccountAlreadyActive(targetAccount) && config?.accounts?.length > 1) {
+      const activeKey = getAccountKey({
+        sessionId: getAccountBoxSessionId(getActiveAccountBox()),
+        email: getAccountBoxEmail(getActiveAccountBox())
+      });
+      const activeIndex = config.accounts.findIndex((account) => getAccountKey(account) === activeKey);
       if (activeIndex >= 0) {
         const nextIndex = (activeIndex + 1) % config.accounts.length;
-        targetEmail = config.accounts[nextIndex];
+        targetAccount = normalizeAccountRecord(config.accounts[nextIndex]);
         await setCycleState(config, {
           index: nextIndex,
           phase: "opening-switcher",
@@ -442,15 +529,15 @@ async function selectTargetAccount(config = null) {
       }
     }
 
-    if (targetEmail && isTargetAccountAlreadyActive(targetEmail)) {
+    if (targetAccount && isTargetAccountAlreadyActive(targetAccount)) {
       if (config) {
         await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
       }
       return true;
     }
 
-    const targetNode = targetEmail
-      ? findAccountSwitchClickableByEmail(targetEmail)
+    const targetNode = targetAccount
+      ? findAccountSwitchClickable(targetAccount)
       : getNextNonActiveAccountBox();
     if (targetNode) {
       if (config) {
@@ -463,8 +550,8 @@ async function selectTargetAccount(config = null) {
     await sleep(250);
   }
 
-  throw new Error(targetEmail
-    ? `Nepodařilo se najít cílový účet ${targetEmail} ve switcheru.`
+  throw new Error(targetAccount
+    ? `Nepodařilo se najít cílový účet ${getAccountLabel(targetAccount)} ve switcheru.`
     : "Nepodařilo se najít další účet ve switcheru.");
 }
 
@@ -947,7 +1034,7 @@ async function handleAccountCycleTick() {
       if (!current.lastQueueIdleAt) {
         await setCycleState(config, { lastQueueIdleAt: idleAt });
         const nextIndex = (current.index + 1) % config.accounts.length;
-        const nextEmail = config.accounts[nextIndex];
+        const nextEmail = getAccountEmail(config.accounts[nextIndex]);
         setStatusText(`${await formatCycleStatus(config, targetEmail)} • vše staženo, jdu zkusit další účet ${nextEmail}…`);
         return;
       }
@@ -958,8 +1045,8 @@ async function handleAccountCycleTick() {
         return;
       }
 
-      const next = await completeCurrentAccountAndAdvance(config, targetEmail);
-      const nextEmail = config.accounts[next.index];
+      const next = await completeCurrentAccountAndAdvance(config, await getTargetAccount(config));
+      const nextEmail = getAccountEmail(config.accounts[next.index]);
       if (next.waitUntil && next.waitUntil > Date.now()) {
         setStatusText(`Účet ${targetEmail}: hotovo. Další kolo proběhne za ${Math.ceil((next.waitUntil - Date.now()) / 1000)} s.`);
         return;
