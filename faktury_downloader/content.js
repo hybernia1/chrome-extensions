@@ -243,11 +243,7 @@ function buildDocumentsUrlForCycle(config = null) {
   const url = new URL("/my-account/documents.htm", ALZA_DOCUMENTS_ORIGIN);
   url.searchParams.set("alzaAutoStart", "1");
   url.searchParams.set("alzaAutoMode", "both");
-  if (config?.accounts?.length) {
-    url.searchParams.set("alzaAccounts", config.accounts.map((account) => getAccountEmail(account)).filter(Boolean).join(","));
-    url.searchParams.set("alzaCyclePauseMinutes", String(Math.max(Math.round(config.roundPauseMs / 60000), 1)));
-    url.searchParams.set("alzaAccountPauseSeconds", String(Math.max(Math.round(config.accountPauseMs / 1000), 1)));
-  }
+  url.searchParams.set("alzaCycleNavTs", String(Date.now()));
   return url.toString();
 }
 
@@ -292,29 +288,13 @@ async function getCycleState(config) {
     roundComplete: false
   };
 
-  try {
-    const stored = JSON.parse(sessionStorage.getItem(ACCOUNT_CYCLE_STATE_KEY) || "null");
-    if (stored && typeof stored === "object") {
-      const index = Number.isInteger(stored.index) ? stored.index : 0;
-      return {
-        ...defaults,
-        ...stored,
-        index: ((index % config.accounts.length) + config.accounts.length) % config.accounts.length
-      };
-    }
-  } catch {
-    // ignore and fall back to extension storage
-  }
-
   const persisted = await getStoredCycleState(config);
   if (!persisted) return defaults;
-  sessionStorage.setItem(ACCOUNT_CYCLE_STATE_KEY, JSON.stringify(persisted));
   return { ...defaults, ...persisted };
 }
 
 async function setCycleState(config, patch) {
   const next = { ...(await getCycleState(config)), ...patch };
-  sessionStorage.setItem(ACCOUNT_CYCLE_STATE_KEY, JSON.stringify(next));
   await persistCycleState(next);
   return next;
 }
@@ -475,8 +455,45 @@ function clickAccountSwitchBox(account) {
   const targetBox = findAccountSwitchBox(account);
   if (!(targetBox instanceof HTMLElement)) return false;
 
+  const clickTargets = [
+    targetBox.querySelector(".user-info--email"),
+    targetBox.querySelector(".user-info--name"),
+    targetBox.querySelector(".user-info"),
+    targetBox
+  ].filter((element, index, items) => element instanceof HTMLElement && items.indexOf(element) === index);
+
+  const triggerClick = (element) => {
+    if (!(element instanceof HTMLElement)) return;
+    element.scrollIntoView?.({ block: "center", inline: "nearest" });
+
+    const rect = element.getBoundingClientRect();
+    const clientX = rect.left + Math.min(Math.max(rect.width / 2, 8), Math.max(rect.width - 8, 8));
+    const clientY = rect.top + Math.min(Math.max(rect.height / 2, 8), Math.max(rect.height - 8, 8));
+    const resolvedTarget = document.elementFromPoint(clientX, clientY);
+    const eventTarget = resolvedTarget instanceof HTMLElement && targetBox.contains(resolvedTarget)
+      ? resolvedTarget
+      : element;
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX,
+      clientY
+    };
+
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      const EventCtor = type.startsWith("pointer") ? (window.PointerEvent || MouseEvent) : MouseEvent;
+      eventTarget.dispatchEvent(new EventCtor(type, eventInit));
+    }
+
+    eventTarget.click();
+  };
+
   targetBox.scrollIntoView({ block: "center", inline: "nearest" });
-  targetBox.click();
+  for (const element of clickTargets) {
+    triggerClick(element);
+  }
   return true;
 }
 
@@ -492,12 +509,6 @@ function getNextNonActiveAccountBox() {
   );
 }
 
-function isTargetAccountAlreadyActive(account) {
-  const normalized = normalizeAccountRecord(account);
-  const activeBox = getActiveAccountBox();
-  if (!activeBox) return false;
-  return !!normalized.email && getAccountBoxEmail(activeBox) === normalized.email;
-}
 
 async function syncCycleConfigWithSwitcherAccounts(config) {
   if (!config) return config;
@@ -538,6 +549,7 @@ async function navigateToAccountSwitcher(config = null) {
   if (config) {
     await setCycleState(config, { phase: "opening-switcher" });
   }
+
   const hydratedUrl = getHeaderHydrationSelectAccountUrl();
   if (hydratedUrl) {
     location.href = hydratedUrl;
@@ -558,13 +570,6 @@ async function selectTargetAccount(config = null) {
   const start = Date.now();
   let targetAccount = config ? await getTargetAccount(config) : null;
   while (Date.now() - start < 15000) {
-    if (targetAccount && isTargetAccountAlreadyActive(targetAccount)) {
-      if (config) {
-        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
-      }
-      return true;
-    }
-
     if (targetAccount && clickAccountSwitchBox(targetAccount)) {
       if (config) {
         await setCycleState(config, {
@@ -617,7 +622,7 @@ async function syncCycleStateWithDocumentsAccount(config) {
     );
   });
 
-  if (matchedIndex >= 0 && matchedIndex !== state.index) {
+  if (matchedIndex >= 0 && matchedIndex !== state.index && state.phase === "processing") {
     state = await setCycleState(config, {
       index: matchedIndex,
       lastQueueIdleAt: 0
@@ -1152,19 +1157,16 @@ async function handleAccountCycleTick() {
     ensureSidebar();
     setStatusText(await formatCycleStatus(config, targetEmail));
 
-    if (cycleState.waitUntil && Date.now() < cycleState.waitUntil) return;
+    if (cycleState.waitUntil && Date.now() < cycleState.waitUntil) {
+      if (isAccountSwitcherPage() && cycleState.phase === "await-documents") {
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • čekám na dokončení přepnutí účtu…`);
+      }
+      return;
+    }
 
     if (isAccountSwitcherPage()) {
       if (cycleState.phase === "await-documents") {
-        const targetAccount = await getTargetAccount(config);
-        if (isTargetAccountAlreadyActive(targetAccount)) {
-          await redirectToDocumentsPageForCycle(config, "přepnutí potvrzeno, otevírám doklady…");
-          return;
-        }
-
-        await setCycleState(config, { phase: "opening-switcher", waitUntil: 0, lastQueueIdleAt: 0 });
-        setStatusText(`${await formatCycleStatus(config, targetEmail)} • přepnutí se nepotvrdilo, zkouším výběr znovu…`);
-        await selectTargetAccount(config);
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • čekám na dokončení přepnutí účtu…`);
         return;
       }
 
@@ -1174,6 +1176,14 @@ async function handleAccountCycleTick() {
     }
 
     if (!isDocumentsPage()) {
+      const loginSuccess = new URLSearchParams(location.search).get("loginSuccess") === "1";
+      if (loginSuccess && (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher" || cycleState.phase === "await-documents")) {
+        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • přepnutí dokončeno, otevírám stránku dokladů…`);
+        location.href = buildDocumentsUrlForCycle(config);
+        return;
+      }
+
       if (cycleState.phase === "await-documents" || cycleState.phase === "processing") {
         setStatusText(`${await formatCycleStatus(config, targetEmail)} • otevírám stránku dokladů…`);
         location.href = buildDocumentsUrlForCycle(config);
@@ -1185,6 +1195,12 @@ async function handleAccountCycleTick() {
     const documentsAccountSync = await syncCycleStateWithDocumentsAccount(config);
     cycleState = documentsAccountSync.state;
     targetEmail = await getTargetAccountEmail(config);
+
+    const navTs = Number.parseInt(new URLSearchParams(location.search).get("alzaCycleNavTs") || "", 10);
+    const hasFreshDocumentsNavigation = Number.isFinite(navTs) && Math.abs(Date.now() - navTs) < 15000;
+    if (hasFreshDocumentsNavigation && (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher")) {
+      cycleState = await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+    }
 
     const resp = await chrome.runtime.sendMessage({ type: "ALZA_GET_STATE" });
     const bgState = resp?.ok ? resp.state : null;
