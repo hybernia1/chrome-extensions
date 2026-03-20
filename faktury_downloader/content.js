@@ -478,8 +478,8 @@ function clickAccountSwitchBox(account) {
 
   const clickTargets = [
     targetBox.querySelector(".user-info--email"),
-    targetBox.querySelector(".user-info"),
     targetBox.querySelector(".user-info--name"),
+    targetBox.querySelector(".user-info"),
     targetBox
   ].filter((element, index, items) => element instanceof HTMLElement && items.indexOf(element) === index);
 
