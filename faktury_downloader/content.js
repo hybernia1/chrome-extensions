@@ -1205,12 +1205,7 @@ async function handleAccountCycleTick() {
     cycleState = documentsAccountSync.state;
     targetEmail = await getTargetAccountEmail(config);
 
-    if (
-      documentsAccountSync.activeAccount?.email &&
-      targetEmail &&
-      documentsAccountSync.activeAccount.email === targetEmail &&
-      (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher")
-    ) {
+    if (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher") {
       cycleState = await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
     }
 
