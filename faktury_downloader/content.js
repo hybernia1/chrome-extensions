@@ -1207,6 +1207,15 @@ async function handleAccountCycleTick() {
     cycleState = documentsAccountSync.state;
     targetEmail = await getTargetAccountEmail(config);
 
+    if (
+      documentsAccountSync.activeAccount?.email &&
+      targetEmail &&
+      documentsAccountSync.activeAccount.email === targetEmail &&
+      (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher")
+    ) {
+      cycleState = await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+    }
+
     const resp = await chrome.runtime.sendMessage({ type: "ALZA_GET_STATE" });
     const bgState = resp?.ok ? resp.state : null;
 
