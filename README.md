@@ -22,13 +22,13 @@ Pro jednodušší použití je v repu i `scripts/run_alza_sync.py`, který:
 - nechá extension automaticky spustit frontu dokladů
 - v autostart režimu pravidelně obnovuje stránku (default každých 10 minut), aby se načetly nové doklady
 - průběžně spouští lokální uploader nad `invoice/` a `isdoc/`
+- launcher se sám neukončuje kvůli neaktivitě; běží, dokud ho uživatel ručně nevypne
 - úspěšné soubory přesouvá do archivu (`processed/` nebo `--archive-dir`) a uklízí prázdné order složky
 - v multi-account režimu umí cyklit přes více Alza účtů podle e-mailu a přes account switcher vždy otevřít další `documents.htm`
 
 Příklady:
 - `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury`
 - `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury --archive-dir /cesta/k/processed`
-- `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury --idle-timeout 300`
 - `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury --account-email a@firma.cz --account-email b@firma.cz`
 - `python3 scripts/run_alza_sync.py --work-root /cesta/k/faktury --accounts-file ./alza-ucty.txt`
 
@@ -39,7 +39,7 @@ Když launcher dostane jeden nebo více `--account-email` nebo `--accounts-file`
 - přepnutí účtu probíhá přes Alza account switcher,
 - po dokončení jednoho účtu se otevře další `documents.htm` pro další účet,
 - po dokončení celého kola se čeká podle `--cycle-pause-minutes` (default 30 minut) a pak začne nové kolo,
-- v tomto režimu launcher neskončí na `idle-timeout`, ale běží dlouhodobě, dokud ho uživatel neukončí.
+- v tomto režimu launcher běží dlouhodobě, dokud ho uživatel neukončí.
 
 ## Python uploader pro lokální soubory
 
