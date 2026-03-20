@@ -86,10 +86,10 @@ function sortAccountRecords(accounts = []) {
 }
 
 async function getSwitcherDiscoveredCycleConfig(baseConfig = null) {
-  const discoveredAccounts = sortAccountRecords(getAccountRecordsFromSwitcher());
+  const discoveredAccounts = getAccountRecordsFromSwitcher();
   const accounts = baseConfig?.accounts?.length
     ? mergeAccountRecords(baseConfig.accounts, discoveredAccounts)
-    : discoveredAccounts;
+    : normalizeAccountRecordList(discoveredAccounts);
   if (!accounts.length) return null;
   const config = {
     accounts,
@@ -467,15 +467,15 @@ function findAccountSwitchBox(account) {
   if (!key) return null;
 
   const boxes = getAccountSwitcherBoxes();
-  const matchedBySession = boxes.find((box) => {
-    return normalized.sessionId && getAccountBoxSessionId(box) === normalized.sessionId;
-  });
-  if (matchedBySession) return matchedBySession;
-
   const matchedByEmail = boxes.find((box) => {
     return normalized.email && getAccountBoxEmail(box) === normalized.email;
   });
-  return matchedByEmail || null;
+  if (matchedByEmail) return matchedByEmail;
+
+  const matchedBySession = boxes.find((box) => {
+    return !normalized.email && normalized.sessionId && getAccountBoxSessionId(box) === normalized.sessionId;
+  });
+  return matchedBySession || null;
 }
 
 function submitAccountSwitcherSelection(account) {
@@ -531,7 +531,7 @@ async function syncCycleConfigWithSwitcherAccounts(config) {
   const cycleState = await getCycleState(config);
   const currentAccounts = normalizeAccountRecordList(Array.isArray(config.accounts) ? config.accounts : []);
   const currentTargetKey = getAccountKey(currentAccounts[cycleState.index] || currentAccounts[0]);
-  const authoritativeAccounts = sortAccountRecords(discoveredAccounts);
+  const authoritativeAccounts = mergeAccountRecords(currentAccounts, discoveredAccounts);
   const changed = (
     authoritativeAccounts.length !== currentAccounts.length ||
     authoritativeAccounts.some((account, index) => getAccountKey(account) !== getAccountKey(currentAccounts[index]))
