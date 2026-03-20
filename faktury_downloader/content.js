@@ -490,6 +490,10 @@ function clickAccountSwitchBox(account) {
     const rect = element.getBoundingClientRect();
     const clientX = rect.left + Math.min(Math.max(rect.width / 2, 8), Math.max(rect.width - 8, 8));
     const clientY = rect.top + Math.min(Math.max(rect.height / 2, 8), Math.max(rect.height - 8, 8));
+    const resolvedTarget = document.elementFromPoint(clientX, clientY);
+    const eventTarget = resolvedTarget instanceof HTMLElement && targetBox.contains(resolvedTarget)
+      ? resolvedTarget
+      : element;
     const eventInit = {
       bubbles: true,
       cancelable: true,
@@ -501,10 +505,10 @@ function clickAccountSwitchBox(account) {
 
     for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
       const EventCtor = type.startsWith("pointer") ? (window.PointerEvent || MouseEvent) : MouseEvent;
-      element.dispatchEvent(new EventCtor(type, eventInit));
+      eventTarget.dispatchEvent(new EventCtor(type, eventInit));
     }
 
-    element.click();
+    eventTarget.click();
   };
 
   targetBox.scrollIntoView({ block: "center", inline: "nearest" });
