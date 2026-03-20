@@ -571,8 +571,20 @@ async function navigateToAccountSwitcher(config = null) {
     await setCycleState(config, { phase: "opening-switcher" });
   }
 
-  location.href = buildAccountSwitcherUrl();
-  return true;
+  const hydratedUrl = getHeaderHydrationSelectAccountUrl();
+  if (hydratedUrl) {
+    location.href = hydratedUrl;
+    return true;
+  }
+
+  if (await ensureHeaderMenuOpen()) {
+    const link = findSelectAccountLink();
+    if (link) {
+      link.click();
+      return true;
+    }
+  }
+  throw new Error("Nepodařilo se otevřít header menu nebo najít odkaz Přepnout účet.");
 }
 
 async function selectTargetAccount(config = null) {
