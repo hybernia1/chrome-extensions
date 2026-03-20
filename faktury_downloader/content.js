@@ -463,42 +463,20 @@ function getCurrentDocumentsPageAccount() {
 
 function findAccountSwitchBox(account) {
   const normalized = normalizeAccountRecord(account);
-  const key = getAccountKey(normalized);
-  if (!key) return null;
+  if (!normalized.email) return null;
 
   const boxes = getAccountSwitcherBoxes();
-  const matchedByEmail = boxes.find((box) => {
+  return boxes.find((box) => {
     return normalized.email && getAccountBoxEmail(box) === normalized.email;
   });
-  if (matchedByEmail) return matchedByEmail;
-
-  const matchedBySession = boxes.find((box) => {
-    return !normalized.email && normalized.sessionId && getAccountBoxSessionId(box) === normalized.sessionId;
-  });
-  return matchedBySession || null;
 }
 
-function submitAccountSwitcherSelection(account) {
+function clickAccountSwitchBox(account) {
   const targetBox = findAccountSwitchBox(account);
-  const form = document.querySelector("form.login-wrapper");
-  const sessionInput = document.getElementById("SelectedSessionId");
-  const targetSessionId = getAccountBoxSessionId(targetBox) || normalizeAccountRecord(account).sessionId;
-
-  if (!targetBox || !form || !(sessionInput instanceof HTMLInputElement) || !targetSessionId) {
-    return false;
-  }
+  if (!(targetBox instanceof HTMLElement)) return false;
 
   targetBox.scrollIntoView({ block: "center", inline: "nearest" });
-  sessionInput.value = targetSessionId;
-  sessionInput.dispatchEvent(new Event("input", { bubbles: true }));
-  sessionInput.dispatchEvent(new Event("change", { bubbles: true }));
-
-  if (typeof form.requestSubmit === "function") {
-    form.requestSubmit();
-    return true;
-  }
-
-  form.submit();
+  targetBox.click();
   return true;
 }
 
@@ -518,7 +496,6 @@ function isTargetAccountAlreadyActive(account) {
   const normalized = normalizeAccountRecord(account);
   const activeBox = getActiveAccountBox();
   if (!activeBox) return false;
-  if (normalized.sessionId && getAccountBoxSessionId(activeBox) === normalized.sessionId) return true;
   return !!normalized.email && getAccountBoxEmail(activeBox) === normalized.email;
 }
 
@@ -591,7 +568,7 @@ async function selectTargetAccount(config = null) {
       return true;
     }
 
-    if (targetAccount && submitAccountSwitcherSelection(targetAccount)) {
+    if (targetAccount && clickAccountSwitchBox(targetAccount)) {
       if (config) {
         await setCycleState(config, {
           phase: "await-documents",
