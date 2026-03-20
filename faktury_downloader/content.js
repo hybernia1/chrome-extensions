@@ -476,50 +476,41 @@ function clickAccountSwitchBox(account) {
   const targetBox = findAccountSwitchBox(account);
   if (!(targetBox instanceof HTMLElement)) return false;
 
-  targetBox.scrollIntoView({ block: "center", inline: "nearest" });
+  const clickTargets = [
+    targetBox.querySelector(".user-info--email"),
+    targetBox.querySelector(".user-info"),
+    targetBox.querySelector(".user-info--name"),
+    targetBox
+  ].filter((element, index, items) => element instanceof HTMLElement && items.indexOf(element) === index);
 
-  const form = targetBox.closest("form");
-  const selectedSessionInput = form?.querySelector("#SelectedSessionId, input[name='SelectedSessionId']");
-  const sessionId = String(targetBox.getAttribute("data-sessionid") || "").trim();
-  if (form instanceof HTMLFormElement && selectedSessionInput instanceof HTMLInputElement && sessionId) {
-    selectedSessionInput.value = sessionId;
-    selectedSessionInput.dispatchEvent(new Event("input", { bubbles: true }));
-    selectedSessionInput.dispatchEvent(new Event("change", { bubbles: true }));
-    if (typeof form.requestSubmit === "function") {
-      form.requestSubmit();
-    } else {
-      form.submit();
+  const triggerClick = (element) => {
+    if (!(element instanceof HTMLElement)) return;
+    element.scrollIntoView?.({ block: "center", inline: "nearest" });
+
+    const rect = element.getBoundingClientRect();
+    const clientX = rect.left + Math.min(Math.max(rect.width / 2, 8), Math.max(rect.width - 8, 8));
+    const clientY = rect.top + Math.min(Math.max(rect.height / 2, 8), Math.max(rect.height - 8, 8));
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX,
+      clientY
+    };
+
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      const EventCtor = type.startsWith("pointer") ? (window.PointerEvent || MouseEvent) : MouseEvent;
+      element.dispatchEvent(new EventCtor(type, eventInit));
     }
-    return true;
-  }
 
-  const clickTarget =
-    targetBox.querySelector(".user-info--email") ||
-    targetBox.querySelector(".user-info") ||
-    targetBox.querySelector(".user-info--name") ||
-    targetBox;
-
-  const element = clickTarget instanceof HTMLElement ? clickTarget : targetBox;
-  element.scrollIntoView?.({ block: "center", inline: "nearest" });
-
-  const rect = element.getBoundingClientRect();
-  const clientX = rect.left + Math.min(Math.max(rect.width / 2, 8), Math.max(rect.width - 8, 8));
-  const clientY = rect.top + Math.min(Math.max(rect.height / 2, 8), Math.max(rect.height - 8, 8));
-  const eventInit = {
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-    view: window,
-    clientX,
-    clientY
+    element.click();
   };
 
-  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-    const EventCtor = type.startsWith("pointer") ? (window.PointerEvent || MouseEvent) : MouseEvent;
-    element.dispatchEvent(new EventCtor(type, eventInit));
+  targetBox.scrollIntoView({ block: "center", inline: "nearest" });
+  for (const element of clickTargets) {
+    triggerClick(element);
   }
-
-  element.click();
   return true;
 }
 
