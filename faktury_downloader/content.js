@@ -640,7 +640,6 @@ async function selectTargetAccount(config = null) {
 async function redirectToDocumentsPageForCycle(config, reasonText = "otevírám stránku dokladů…") {
   const targetEmail = await getTargetAccountEmail(config);
   setStatusText(`${await formatCycleStatus(config, targetEmail)} • ${reasonText}`);
-  await sleep(750);
   location.href = buildDocumentsUrlForCycle(config);
 }
 
@@ -1205,16 +1204,20 @@ async function handleAccountCycleTick() {
 
     if (isAccountSwitcherPage()) {
       if (cycleState.phase === "await-documents") {
-        await redirectToDocumentsPageForCycle(config, "účet je připravený, otevírám doklady…");
+        const targetAccount = await getTargetAccount(config);
+        if (isTargetAccountAlreadyActive(targetAccount)) {
+          await redirectToDocumentsPageForCycle(config, "přepnutí potvrzeno, otevírám doklady…");
+          return;
+        }
+
+        await setCycleState(config, { phase: "opening-switcher", waitUntil: 0, lastQueueIdleAt: 0 });
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • přepnutí se nepotvrdilo, zkouším výběr znovu…`);
+        await selectTargetAccount(config);
         return;
       }
 
       setStatusText(`${await formatCycleStatus(config, targetEmail)} • vybírám účet ve switcheru…`);
       await selectTargetAccount(config);
-      const nextState = await getCycleState(config);
-      if (nextState.phase === "await-documents") {
-        await redirectToDocumentsPageForCycle(config, "účet vybrán, otevírám doklady…");
-      }
       return;
     }
 
