@@ -594,7 +594,7 @@ async function startNextIfIdle() {
 
       if (!nextTask) {
         await setState({ running: false });
-        await setStatus("Queue prázdná.");
+        await setStatus("Queue prázdná, vše staženo/uploadováno.");
         await pushStateToUI();
         return;
       }
@@ -633,7 +633,19 @@ async function startNextIfIdle() {
       const execAck = await ackPromise;
 
       const afterAck = await getState();
-      if (!afterAck.running || !afterAck.active || afterAck.active.runId !== runId) return;
+      if (!afterAck.running) return;
+      if (!afterAck.active || afterAck.active.runId !== runId) {
+        const rec = afterAck.done?.[row.invoiceNo] || {};
+        const isAlreadyDone =
+          nextTask.mode === "pdf" ? Boolean(rec.pdfServerPath || rec.pdf) :
+          nextTask.mode === "isdoc" ? Boolean(rec.isdocServerPath || rec.isdoc) :
+          Boolean(rec.pdfServerPath || rec.pdf) && Boolean(rec.isdocServerPath || rec.isdoc);
+        const recoveredQueue = isAlreadyDone ? (afterAck.queue || []) : [{ ...nextTask }, ...(afterAck.queue || [])];
+        await setState({ active: null, queue: recoveredQueue });
+        await setStatus(`Runner sync po ACK: ${row.invoiceNo} (${nextTask.mode})`);
+        await pushStateToUI();
+        continue;
+      }
 
       if (!execAck?.ok) {
         await setState({ active: null });
@@ -658,7 +670,18 @@ async function startNextIfIdle() {
       const pollResult = await pollForCompletion(active, DOWNLOAD_TIMEOUT_MS);
       const st2 = await getState();
       if (!st2.running) return;
-      if (pollResult?.aborted) return;
+      if (pollResult?.aborted) {
+        const rec = st2.done?.[row.invoiceNo] || {};
+        const isAlreadyDone =
+          nextTask.mode === "pdf" ? Boolean(rec.pdfServerPath || rec.pdf) :
+          nextTask.mode === "isdoc" ? Boolean(rec.isdocServerPath || rec.isdoc) :
+          Boolean(rec.pdfServerPath || rec.pdf) && Boolean(rec.isdocServerPath || rec.isdoc);
+        const recoveredQueue = isAlreadyDone ? (st2.queue || []) : [{ ...nextTask }, ...(st2.queue || [])];
+        await setState({ active: null, queue: recoveredQueue });
+        await setStatus(`Runner sync po pollingu: ${row.invoiceNo} (${nextTask.mode})`);
+        await pushStateToUI();
+        continue;
+      }
 
       if (pollResult?.timeout) {
         await setState({ active: null });
