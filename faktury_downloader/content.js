@@ -1221,7 +1221,9 @@ async function handleAccountCycleTick() {
     cycleState = documentsAccountSync.state;
     targetEmail = await getTargetAccountEmail(config);
 
-    if (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher") {
+    const navTs = Number.parseInt(new URLSearchParams(location.search).get("alzaCycleNavTs") || "", 10);
+    const hasFreshDocumentsNavigation = Number.isFinite(navTs) && Math.abs(Date.now() - navTs) < 15000;
+    if (hasFreshDocumentsNavigation && (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher")) {
       cycleState = await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
     }
 
