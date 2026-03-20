@@ -215,8 +215,8 @@ async function getAccountCycleConfig() {
     return config;
   }
 
-  if (isAccountSwitcherPage()) {
-    return await getSwitcherDiscoveredCycleConfig(storedConfig);
+  if (isAccountSwitcherPage() && !storedConfig) {
+    return await getSwitcherDiscoveredCycleConfig(null);
   }
 
   return storedConfig;
@@ -555,9 +555,6 @@ async function navigateToAccountSwitcher(config = null) {
 }
 
 async function selectTargetAccount(config = null) {
-  if (config) {
-    config = await syncCycleConfigWithSwitcherAccounts(config);
-  }
   const start = Date.now();
   let targetAccount = config ? await getTargetAccount(config) : null;
   while (Date.now() - start < 15000) {
