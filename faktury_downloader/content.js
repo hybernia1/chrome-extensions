@@ -248,6 +248,7 @@ function buildDocumentsUrlForCycle(config = null) {
     url.searchParams.set("alzaCyclePauseMinutes", String(Math.max(Math.round(config.roundPauseMs / 60000), 1)));
     url.searchParams.set("alzaAccountPauseSeconds", String(Math.max(Math.round(config.accountPauseMs / 1000), 1)));
   }
+  url.searchParams.set("alzaCycleNavTs", String(Date.now()));
   return url.toString();
 }
 
@@ -492,12 +493,6 @@ function getNextNonActiveAccountBox() {
   );
 }
 
-function isTargetAccountAlreadyActive(account) {
-  const normalized = normalizeAccountRecord(account);
-  const activeBox = getActiveAccountBox();
-  if (!activeBox) return false;
-  return !!normalized.email && getAccountBoxEmail(activeBox) === normalized.email;
-}
 
 async function syncCycleConfigWithSwitcherAccounts(config) {
   if (!config) return config;
@@ -558,13 +553,6 @@ async function selectTargetAccount(config = null) {
   const start = Date.now();
   let targetAccount = config ? await getTargetAccount(config) : null;
   while (Date.now() - start < 15000) {
-    if (targetAccount && isTargetAccountAlreadyActive(targetAccount)) {
-      if (config) {
-        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
-      }
-      return true;
-    }
-
     if (targetAccount && clickAccountSwitchBox(targetAccount)) {
       if (config) {
         await setCycleState(config, {
@@ -1160,13 +1148,6 @@ async function handleAccountCycleTick() {
     }
 
     if (isAccountSwitcherPage()) {
-      const targetAccount = await getTargetAccount(config);
-      if (isTargetAccountAlreadyActive(targetAccount)) {
-        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
-        await redirectToDocumentsPageForCycle(config, "cílový účet už je aktivní, otevírám doklady…");
-        return;
-      }
-
       if (cycleState.phase === "await-documents") {
         await setCycleState(config, { phase: "opening-switcher", waitUntil: 0, lastQueueIdleAt: 0 });
         setStatusText(`${await formatCycleStatus(config, targetEmail)} • přepnutí se nedokončilo včas, zkouším výběr znovu…`);
