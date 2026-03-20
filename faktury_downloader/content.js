@@ -1180,6 +1180,14 @@ async function handleAccountCycleTick() {
     }
 
     if (!isDocumentsPage()) {
+      const loginSuccess = new URLSearchParams(location.search).get("loginSuccess") === "1";
+      if (loginSuccess && (cycleState.phase === "ensure-account" || cycleState.phase === "opening-switcher" || cycleState.phase === "await-documents")) {
+        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • přepnutí dokončeno, otevírám stránku dokladů…`);
+        location.href = buildDocumentsUrlForCycle(config);
+        return;
+      }
+
       if (cycleState.phase === "await-documents" || cycleState.phase === "processing") {
         setStatusText(`${await formatCycleStatus(config, targetEmail)} • otevírám stránku dokladů…`);
         location.href = buildDocumentsUrlForCycle(config);
