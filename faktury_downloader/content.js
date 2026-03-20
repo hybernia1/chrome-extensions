@@ -243,11 +243,6 @@ function buildDocumentsUrlForCycle(config = null) {
   const url = new URL("/my-account/documents.htm", ALZA_DOCUMENTS_ORIGIN);
   url.searchParams.set("alzaAutoStart", "1");
   url.searchParams.set("alzaAutoMode", "both");
-  if (config?.accounts?.length) {
-    url.searchParams.set("alzaAccounts", config.accounts.map((account) => getAccountEmail(account)).filter(Boolean).join(","));
-    url.searchParams.set("alzaCyclePauseMinutes", String(Math.max(Math.round(config.roundPauseMs / 60000), 1)));
-    url.searchParams.set("alzaAccountPauseSeconds", String(Math.max(Math.round(config.accountPauseMs / 1000), 1)));
-  }
   url.searchParams.set("alzaCycleNavTs", String(Date.now()));
   return url.toString();
 }
