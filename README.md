@@ -38,7 +38,7 @@ Když launcher dostane jeden nebo více `--account-email` nebo `--accounts-file`
 - účty se obcházejí stále dokola v pořadí zadaných e-mailů,
 - přepnutí účtu probíhá přes Alza account switcher,
 - po dokončení jednoho účtu se otevře další `documents.htm` pro další účet,
-- po dokončení celého kola se čeká podle `--cycle-pause-minutes` (default 10 minut) a pak začne nové kolo,
+- po dokončení celého kola se čeká podle `--cycle-pause-minutes` (default 30 minut) a pak začne nové kolo,
 - v tomto režimu launcher neskončí na `idle-timeout`, ale běží dlouhodobě, dokud ho uživatel neukončí.
 
 ## Python uploader pro lokální soubory
