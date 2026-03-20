@@ -15,7 +15,7 @@ DEFAULT_DOCUMENTS_URL = "https://www.alza.cz/my-account/documents.htm"
 DEFAULT_POLL_INTERVAL = 5
 DEFAULT_IDLE_TIMEOUT = 180
 DEFAULT_STARTUP_GRACE = 120
-DEFAULT_CYCLE_PAUSE_MINUTES = 10
+DEFAULT_CYCLE_PAUSE_MINUTES = 30
 
 
 def parse_accounts_file(path: Path) -> list[str]:
