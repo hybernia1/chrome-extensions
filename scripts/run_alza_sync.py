@@ -13,8 +13,6 @@ from urllib import parse
 
 DEFAULT_DOCUMENTS_URL = "https://www.alza.cz/my-account/documents.htm"
 DEFAULT_POLL_INTERVAL = 5
-DEFAULT_IDLE_TIMEOUT = 180
-DEFAULT_STARTUP_GRACE = 120
 DEFAULT_CYCLE_PAUSE_MINUTES = 30
 
 
@@ -68,18 +66,6 @@ def parse_args() -> argparse.Namespace:
         help=f"Kolik sekund čekat mezi upload skeny (default: {DEFAULT_POLL_INTERVAL}).",
     )
     parser.add_argument(
-        "--idle-timeout",
-        type=int,
-        default=DEFAULT_IDLE_TIMEOUT,
-        help=f"Po kolika sekundách bez nových lokálních souborů běh ukončit (default: {DEFAULT_IDLE_TIMEOUT}).",
-    )
-    parser.add_argument(
-        "--startup-grace",
-        type=int,
-        default=DEFAULT_STARTUP_GRACE,
-        help=f"Minimální doba po startu, po kterou se nevyhodnocuje idle timeout (default: {DEFAULT_STARTUP_GRACE}).",
-    )
-    parser.add_argument(
         "--endpoint",
         default=None,
         help="Volitelně přepíše endpoint předaný uploaderu.",
@@ -110,36 +96,6 @@ def build_documents_url_with_accounts(base_url: str, account_emails: list[str], 
         query["alzaAccounts"] = [",".join(account_emails)]
         query["alzaCyclePauseMinutes"] = [str(max(cycle_pause_minutes, 1))]
     return parse.urlunsplit(parsed._replace(query=parse.urlencode(query, doseq=True)))
-
-
-def count_local_files(root: Path) -> int:
-    count = 0
-    for subdir, patterns in {
-        "invoice": ("*.pdf",),
-        "isdoc": ("*.isdoc", "*.isdocx"),
-    }.items():
-        base = root / subdir
-        if not base.exists():
-            continue
-        for pattern in patterns:
-            count += sum(1 for path in base.rglob(pattern) if path.is_file())
-    return count
-
-
-def snapshot_local_files(root: Path) -> tuple[str, ...]:
-    files: list[str] = []
-    for subdir, patterns in {
-        "invoice": ("*.pdf",),
-        "isdoc": ("*.isdoc", "*.isdocx"),
-    }.items():
-        base = root / subdir
-        if not base.exists():
-            continue
-        for pattern in patterns:
-            for path in base.rglob(pattern):
-                if path.is_file():
-                    files.append(str(path.relative_to(root)).replace("\\", "/"))
-    return tuple(sorted(files))
 
 
 def run_uploader(args: argparse.Namespace, work_root: Path, archive_dir: Path) -> subprocess.CompletedProcess[str]:
@@ -181,23 +137,15 @@ def main() -> int:
         print("[ERR] Nepodařilo se otevřít default browser.", file=sys.stderr)
         return 1
 
-    started_at = time.monotonic()
-    last_activity_at = started_at
-    previous_snapshot = snapshot_local_files(work_root)
-    keep_running = bool(account_emails)
-
-    if keep_running:
+    if account_emails:
         print(
             "[INFO] Multi-account režim aktivní pro účty: "
             + ", ".join(account_emails)
-            + ". Idle timeout se v tomto režimu nevynucuje a běh pokračuje stále dokola."
+            + ". Běh pokračuje stále dokola, dokud launcher ručně neukončíte."
         )
 
     while True:
-        before_count = count_local_files(work_root)
         result = run_uploader(args, work_root, archive_dir)
-        after_count = count_local_files(work_root)
-        current_snapshot = snapshot_local_files(work_root)
 
         if result.stdout.strip():
             print(result.stdout.strip())
@@ -206,22 +154,6 @@ def main() -> int:
 
         if result.returncode not in (0,):
             print(f"[ERR] Uploader skončil s kódem {result.returncode}.", file=sys.stderr)
-
-        if (
-            before_count != after_count
-            or current_snapshot != previous_snapshot
-            or "[OK]" in result.stdout
-            or "[DRY]" in result.stdout
-        ):
-            last_activity_at = time.monotonic()
-        previous_snapshot = current_snapshot
-
-        if not keep_running:
-            elapsed = time.monotonic() - started_at
-            idle_for = time.monotonic() - last_activity_at
-            if elapsed >= args.startup_grace and idle_for >= args.idle_timeout:
-                print(f"[INFO] Idle timeout {args.idle_timeout}s vypršel, workflow končí.")
-                return 0
 
         time.sleep(max(args.poll_interval, 1))
 
