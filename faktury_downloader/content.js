@@ -288,29 +288,13 @@ async function getCycleState(config) {
     roundComplete: false
   };
 
-  try {
-    const stored = JSON.parse(sessionStorage.getItem(ACCOUNT_CYCLE_STATE_KEY) || "null");
-    if (stored && typeof stored === "object") {
-      const index = Number.isInteger(stored.index) ? stored.index : 0;
-      return {
-        ...defaults,
-        ...stored,
-        index: ((index % config.accounts.length) + config.accounts.length) % config.accounts.length
-      };
-    }
-  } catch {
-    // ignore and fall back to extension storage
-  }
-
   const persisted = await getStoredCycleState(config);
   if (!persisted) return defaults;
-  sessionStorage.setItem(ACCOUNT_CYCLE_STATE_KEY, JSON.stringify(persisted));
   return { ...defaults, ...persisted };
 }
 
 async function setCycleState(config, patch) {
   const next = { ...(await getCycleState(config)), ...patch };
-  sessionStorage.setItem(ACCOUNT_CYCLE_STATE_KEY, JSON.stringify(next));
   await persistCycleState(next);
   return next;
 }
