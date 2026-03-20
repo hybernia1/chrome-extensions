@@ -476,6 +476,23 @@ function clickAccountSwitchBox(account) {
   const targetBox = findAccountSwitchBox(account);
   if (!(targetBox instanceof HTMLElement)) return false;
 
+  targetBox.scrollIntoView({ block: "center", inline: "nearest" });
+
+  const form = targetBox.closest("form");
+  const selectedSessionInput = form?.querySelector("#SelectedSessionId, input[name='SelectedSessionId']");
+  const sessionId = String(targetBox.getAttribute("data-sessionid") || "").trim();
+  if (form instanceof HTMLFormElement && selectedSessionInput instanceof HTMLInputElement && sessionId) {
+    selectedSessionInput.value = sessionId;
+    selectedSessionInput.dispatchEvent(new Event("input", { bubbles: true }));
+    selectedSessionInput.dispatchEvent(new Event("change", { bubbles: true }));
+    if (typeof form.requestSubmit === "function") {
+      form.requestSubmit();
+    } else {
+      form.submit();
+    }
+    return true;
+  }
+
   const clickTarget =
     targetBox.querySelector(".user-info--email") ||
     targetBox.querySelector(".user-info") ||
@@ -483,7 +500,6 @@ function clickAccountSwitchBox(account) {
     targetBox;
 
   const element = clickTarget instanceof HTMLElement ? clickTarget : targetBox;
-  targetBox.scrollIntoView({ block: "center", inline: "nearest" });
   element.scrollIntoView?.({ block: "center", inline: "nearest" });
 
   const rect = element.getBoundingClientRect();
