@@ -15,7 +15,7 @@ const ACCOUNT_CYCLE_STATE_KEY = "alzaAccountCycleStateV1";
 const ACCOUNT_CYCLE_CONFIG_KEY = "alzaAccountCycleConfigV1";
 const ALZA_DOCUMENTS_ORIGIN = "https://www.alza.cz";
 const DEFAULT_ACCOUNT_PAUSE_MS = 10 * 1000;
-const DEFAULT_ROUND_PAUSE_MS = 60 * 1000;
+const DEFAULT_ROUND_PAUSE_MS = 30 * 60 * 1000;
 
 function normalizeAccountRecord(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
