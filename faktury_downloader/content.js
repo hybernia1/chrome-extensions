@@ -1152,18 +1152,18 @@ async function handleAccountCycleTick() {
     ensureSidebar();
     setStatusText(await formatCycleStatus(config, targetEmail));
 
-    if (cycleState.waitUntil && Date.now() < cycleState.waitUntil) return;
+    if (cycleState.waitUntil && Date.now() < cycleState.waitUntil) {
+      if (isAccountSwitcherPage() && cycleState.phase === "await-documents") {
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • čekám na dokončení přepnutí účtu…`);
+      }
+      return;
+    }
 
     if (isAccountSwitcherPage()) {
       if (cycleState.phase === "await-documents") {
-        const targetAccount = await getTargetAccount(config);
-        if (isTargetAccountAlreadyActive(targetAccount)) {
-          await redirectToDocumentsPageForCycle(config, "přepnutí potvrzeno, otevírám doklady…");
-          return;
-        }
 
         await setCycleState(config, { phase: "opening-switcher", waitUntil: 0, lastQueueIdleAt: 0 });
-        setStatusText(`${await formatCycleStatus(config, targetEmail)} • přepnutí se nepotvrdilo, zkouším výběr znovu…`);
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • přepnutí se nedokončilo včas, zkouším výběr znovu…`);
         await selectTargetAccount(config);
         return;
       }
