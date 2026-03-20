@@ -1160,8 +1160,14 @@ async function handleAccountCycleTick() {
     }
 
     if (isAccountSwitcherPage()) {
-      if (cycleState.phase === "await-documents") {
+      const targetAccount = await getTargetAccount(config);
+      if (isTargetAccountAlreadyActive(targetAccount)) {
+        await setCycleState(config, { phase: "await-documents", waitUntil: 0, lastQueueIdleAt: 0 });
+        await redirectToDocumentsPageForCycle(config, "cílový účet už je aktivní, otevírám doklady…");
+        return;
+      }
 
+      if (cycleState.phase === "await-documents") {
         await setCycleState(config, { phase: "opening-switcher", waitUntil: 0, lastQueueIdleAt: 0 });
         setStatusText(`${await formatCycleStatus(config, targetEmail)} • přepnutí se nedokončilo včas, zkouším výběr znovu…`);
         await selectTargetAccount(config);
