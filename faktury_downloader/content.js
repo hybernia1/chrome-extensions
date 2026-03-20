@@ -1175,9 +1175,7 @@ async function handleAccountCycleTick() {
 
     if (isAccountSwitcherPage()) {
       if (cycleState.phase === "await-documents") {
-        await setCycleState(config, { phase: "opening-switcher", waitUntil: 0, lastQueueIdleAt: 0 });
-        setStatusText(`${await formatCycleStatus(config, targetEmail)} • přepnutí se nedokončilo včas, zkouším výběr znovu…`);
-        await selectTargetAccount(config);
+        setStatusText(`${await formatCycleStatus(config, targetEmail)} • čekám na dokončení přepnutí účtu…`);
         return;
       }
 
