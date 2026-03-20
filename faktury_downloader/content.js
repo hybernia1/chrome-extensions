@@ -461,64 +461,44 @@ function getCurrentDocumentsPageAccount() {
   return normalizeAccountRecord({ email });
 }
 
-function findAccountSwitchClickable(account) {
+function findAccountSwitchBox(account) {
   const normalized = normalizeAccountRecord(account);
   const key = getAccountKey(normalized);
   if (!key) return null;
 
   const boxes = getAccountSwitcherBoxes();
-  const matchedBox = boxes.find((box) => {
+  const matchedBySession = boxes.find((box) => {
+    return normalized.sessionId && getAccountBoxSessionId(box) === normalized.sessionId;
+  });
+  if (matchedBySession) return matchedBySession;
+
+  const matchedByEmail = boxes.find((box) => {
     return normalized.email && getAccountBoxEmail(box) === normalized.email;
   });
-  if (matchedBox) return matchedBox.closest("a") || matchedBox;
-
-  const partialBox = boxes.find((box) => {
-    const text = (box.textContent || "").trim().toLowerCase();
-    return normalized.email && text.includes(normalized.email);
-  });
-  if (partialBox) return partialBox.closest("a") || partialBox;
-
-  const containers = Array.from(document.querySelectorAll("main, [role='dialog'], body"));
-  for (const container of containers) {
-    const nodes = Array.from(container.querySelectorAll("a, button, [role='button'], div, span"));
-    const exact = nodes.find((node) => normalized.email && (node.textContent || "").trim().toLowerCase() === normalized.email);
-    const partial = nodes.find((node) => normalized.email && (node.textContent || "").trim().toLowerCase().includes(normalized.email));
-    const candidate = exact || partial;
-    if (candidate) return candidate.closest("a, button, [role='button'], .account-box") || candidate;
-  }
-
-  return null;
+  return matchedByEmail || null;
 }
 
-function triggerRealClick(node) {
-  if (!(node instanceof HTMLElement)) return false;
-  node.scrollIntoView({ block: "center", inline: "nearest" });
+function submitAccountSwitcherSelection(account) {
+  const targetBox = findAccountSwitchBox(account);
+  const form = document.querySelector("form.login-wrapper");
+  const sessionInput = document.getElementById("SelectedSessionId");
+  const targetSessionId = getAccountBoxSessionId(targetBox) || normalizeAccountRecord(account).sessionId;
 
-  const events = [
-    ["pointerdown", PointerEvent],
-    ["mousedown", MouseEvent],
-    ["pointerup", PointerEvent],
-    ["mouseup", MouseEvent],
-    ["click", MouseEvent]
-  ];
-
-  for (const [type, EventCtor] of events) {
-    try {
-      node.dispatchEvent(new EventCtor(type, {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: window
-      }));
-    } catch {
-      node.dispatchEvent(new MouseEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        view: window
-      }));
-    }
+  if (!targetBox || !form || !(sessionInput instanceof HTMLInputElement) || !targetSessionId) {
+    return false;
   }
 
+  targetBox.scrollIntoView({ block: "center", inline: "nearest" });
+  sessionInput.value = targetSessionId;
+  sessionInput.dispatchEvent(new Event("input", { bubbles: true }));
+  sessionInput.dispatchEvent(new Event("change", { bubbles: true }));
+
+  if (typeof form.requestSubmit === "function") {
+    form.requestSubmit();
+    return true;
+  }
+
+  form.submit();
   return true;
 }
 
@@ -611,8 +591,7 @@ async function selectTargetAccount(config = null) {
       return true;
     }
 
-    const targetNode = targetAccount ? findAccountSwitchClickable(targetAccount) : null;
-    if (targetNode) {
+    if (targetAccount && submitAccountSwitcherSelection(targetAccount)) {
       if (config) {
         await setCycleState(config, {
           phase: "await-documents",
@@ -625,7 +604,6 @@ async function selectTargetAccount(config = null) {
           roundComplete: false
         });
       }
-      triggerRealClick(targetNode);
       return true;
     }
 
