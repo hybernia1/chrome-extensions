@@ -638,7 +638,7 @@ async function syncCycleStateWithDocumentsAccount(config) {
     );
   });
 
-  if (matchedIndex >= 0 && matchedIndex !== state.index) {
+  if (matchedIndex >= 0 && matchedIndex !== state.index && state.phase === "processing") {
     state = await setCycleState(config, {
       index: matchedIndex,
       lastQueueIdleAt: 0
